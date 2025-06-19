@@ -1,0 +1,796 @@
+---
+title: "3.INTERSECTIONS"
+author: "Daniel Bernad Ibáñez"
+date: "2025-05-07"
+output: html_document
+---
+
+```{r}
+# Create gene overlap analysis
+library(UpSetR)
+
+
+print(upset_genes)
+```
+
+
+
+```{r}
+# Network plot for pathway relationships
+# First, calculate term similarities
+go_sim <- pairwise_termsim(go_comparison)
+
+# Create network plot
+p4 <- emapplot(go_sim, 
+               showCategory = 20,
+               color = "p.adjust",
+               layout = "kk")
+
+print(p4)
+
+```
+
+# =============================================================================
+# 
+# Comparisons WITH MULTIPLE DATABASES
+# 
+# =============================================================================
+```{r}
+# Function to install and load packages
+install_and_load <- function(packages) {
+  # Detect Bioconductor packages
+  bioc_packages <- c("clusterProfiler", "org.Hs.eg.db", "ReactomePA",
+                     "dorothea", "enrichplot")
+  
+  for (pkg in packages) {
+    if (!require(pkg, character.only = TRUE)) {
+      if (pkg %in% bioc_packages) {
+        # Install BiocManager if not available
+        if (!requireNamespace("BiocManager", quietly = TRUE)) {
+          install.packages("BiocManager")
+        }
+        BiocManager::install(pkg, update = FALSE, ask = FALSE)
+      } else {
+        install.packages(pkg, dependencies = TRUE)
+      }
+      library(pkg, character.only = TRUE)
+    }
+  }
+}
+
+# List of required packages
+required_packages <- c(
+  "clusterProfiler", "org.Hs.eg.db", "ReactomePA",
+  "dplyr", "readr", "tibble", "dorothea", "openxlsx",
+  "tidyverse", "plotly", "clusterProfiler", "org.Hs.eg.db",
+  "ggplot2", "BiocManager", "writexl", "enrichplot",
+  "ComplexHeatmap", "UpSetR", "VennDiagram", "DOSE"
+)
+
+# Install and load packages
+cat("Installing and loading libraries...\n")
+install_and_load(required_packages)
+
+# Set organism database
+OrgDb <- org.Hs.eg.db
+```
+
+# =============================================================================
+# 1. UNIVERSAL PLOT SAVING FUNCTION
+# =============================================================================
+```{r}
+# Enhanced function to save plots in multiple formats including JPG
+save_plot_enhanced <- function(plot, filename, width=10, height=8, dpi=300) {
+  # Create output directory if it doesn't exist
+  if (!dir.exists("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/compare")) {
+    dir.create("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/compare")
+  }
+  
+  # Full path with directory
+  full_path <- file.path("enrichment_plots", filename)
+  
+  # Save as JPG - requested format
+  jpeg(paste0(full_path, ".jpg"), width=width, height=height, units="in", res=dpi)
+  print(plot)
+  dev.off()
+  
+  # Save as PNG - web compatible
+  png(paste0(full_path, ".png"), width=width, height=height, units="in", res=dpi)
+  print(plot)
+  dev.off()
+  
+  # Save as PDF - publication quality
+  pdf(paste0(full_path, ".pdf"), width=width, height=height)
+  print(plot)
+  dev.off()
+  
+  cat("Plot saved as:", paste0(full_path, c(".jpg", ".png", ".pdf")), "\n")
+  return(plot)
+}
+```
+
+# =============================================================================
+# 2. PREPARE GENE LISTS AND VALIDATE DATA
+# =============================================================================
+```{r}
+up_AF_filtered <- up_AF_filtered %>% rename(ENTREZID = geneID)
+down_AF_filtered <- down_AF_filtered %>% rename(ENTREZID = geneID)
+
+# Example DEG lists structure
+deg_list <- list(
+  act_up = up_act_filtered_annotated,
+  act_down = down_act_filtered_annotated,
+  dys_up = up_dys_filtered_annotated,
+  dys_down = down_dys_filtered_annotated,
+  endMT_up = up_endMT_filtered_annotated,
+  endMT_down = down_endMT_filtered_annotated,
+  AF_up = up_AF_filtered,
+  AF_down = down_AF_filtered
+)
+
+# Ensure gene lists contain appropriate identifiers
+```
+
+```{r}
+# Enhanced data validation function
+validate_gene_lists_enhanced <- function(deg_list) {
+  cat("=== GENE LIST VALIDATION ===\n")
+  
+  validation_results <- lapply(names(deg_list), function(name) {
+    df <- deg_list[[name]]
+    
+    # Basic checks
+    if(nrow(df) == 0) {
+      return(list(status = "ERROR", message = paste(name, "contains no genes")))
+    }
+    
+    if(!"ENTREZID" %in% colnames(df)) {
+      return(list(status = "ERROR", message = paste(name, "missing ENTREZID column")))
+    }
+    
+    # Count statistics
+    total_genes <- nrow(df)
+    na_count <- sum(is.na(df$ENTREZID))
+    valid_genes <- total_genes - na_count
+    
+    return(list(
+      status = "OK",
+      total = total_genes,
+      valid = valid_genes,
+      na_count = na_count
+    ))
+  })
+  
+  names(validation_results) <- names(deg_list)
+  
+  # Print validation summary
+  for(name in names(validation_results)) {
+    result <- validation_results[[name]]
+    if(result$status == "OK") {
+      cat(sprintf("%s: %d total, %d valid, %d NA\n", 
+                  name, result$total, result$valid, result$na_count))
+    } else {
+      cat(sprintf("%s: %s\n", name, result$message))
+    }
+  }
+  
+  return(all(sapply(validation_results, function(x) x$status == "OK")))
+}
+
+# Validate input data
+if(!validate_gene_lists_enhanced(deg_list)) {
+  stop("Data validation failed. Please check your gene lists.")
+}
+```
+
+```{r}
+# Step 1: Extract ENTREZID vectors
+deg_list_entrez <- lapply(deg_list, function(df) df$ENTREZID)
+
+# Step 2: Create binary matrix
+gene_matrix <- fromList(deg_list_entrez)
+
+# Step 3: Plot UpSet
+upset_genes <- upset(gene_matrix, 
+      sets = names(deg_list_entrez),
+      order.by = "freq",
+      nsets = length(deg_list_entrez),
+      nintersects = 40)
+
+ png("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/compare/combined_genes_upset.jpeg", 
+      width=16, height=12, units="in", res=300)
+  print(upset_all_pathways)
+  dev.off()
+  
+  cat("Combined gebes UpSet plot saved!\n")
+
+```
+
+
+# =============================================================================
+# 3. PREPARE DATA FOR ALL ENRICHMENT ANALYSES
+# =============================================================================
+```{r}
+# Extract ENTREZID vectors and clean
+deg_list_entrez <- lapply(deg_list, function(df) {
+  unique(df$ENTREZID[!is.na(df$ENTREZID)])
+})
+
+# Remove empty lists
+deg_list_entrez <- deg_list_entrez[sapply(deg_list_entrez, length) > 0]
+
+cat("Prepared gene lists:\n")
+print(sapply(deg_list_entrez, length))
+```
+
+# =============================================================================
+# 4. ENRICHMENT ANALYSES FOR ALL DATABASES
+# =============================================================================
+```{r}
+cat("\n=== PERFORMING ENRICHMENT ANALYSES ===\n")
+```
+
+```{r}
+# 4.1 GO Biological Process (existing)
+cat("1. GO Biological Process analysis...\n")
+go_comparison <- compareCluster(
+  geneCluster = deg_list_entrez,
+  fun = "enrichGO",
+  OrgDb = OrgDb,
+  ont = "ALL",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05,
+  qvalueCutoff = 0.2,
+  readable = TRUE
+)
+```
+
+```{r}
+# 4.2 KEGG Pathways (existing)
+cat("2. KEGG Pathway analysis...\n")
+kegg_comparison <- compareCluster(
+  geneCluster = deg_list_entrez,
+  fun = "enrichKEGG",
+  organism = "hsa",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05,
+  qvalueCutoff = 0.2
+)
+kegg_comparison <- setReadable(kegg_comparison, OrgDb = OrgDb, keyType = "ENTREZID")
+```
+
+```{r}
+# 4.3 Reactome Pathways (NEW)
+cat("3. Reactome Pathway analysis...\n")
+reactome_comparison <- compareCluster(
+  geneCluster = deg_list_entrez,
+  fun = "enrichPathway",
+  organism = "human",
+  pvalueCutoff = 0.05,
+  pAdjustMethod = "BH",
+  qvalueCutoff = 0.2,
+  readable = TRUE
+)
+```
+
+```{r}
+# 4.4 MSigDB Hallmarks (NEW)
+cat("4. MSigDB Hallmarks analysis...\n")
+
+# Get MSigDB Hallmarks for human
+hallmarks_db <- read.gmt("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Databases/h.all.v2024.1.Hs.symbols.gmt")
+hallmarks_t2g <- hallmarks_db %>% 
+  dplyr::select(term, gene) %>% 
+  dplyr::rename(TERM = term, SYMBOL = gene) %>%
+  dplyr::left_join(
+    AnnotationDbi::select(org.Hs.eg.db, 
+                          keys = .$SYMBOL, 
+                          keytype = "SYMBOL", 
+                          columns = "ENTREZID"),
+    by = "SYMBOL",
+    relationship = "many-to-many"  # Explicit declaration
+  ) %>%
+  dplyr::filter(!is.na(ENTREZID)) %>%
+  dplyr::select(TERM, ENTREZID) %>%
+  dplyr::rename(GENE = ENTREZID)
+
+hallmarks_comparison <- compareCluster(
+  geneCluster = deg_list_entrez,
+  fun = "enricher",
+  TERM2GENE = hallmarks_t2g,
+  pvalueCutoff = 0.05,
+  pAdjustMethod = "BH",
+  qvalueCutoff = 0.2
+)
+```
+
+```{r}
+# 4.5 DoRothEA Transcription Factors (NEW)
+cat("5. DoRothEA TF analysis...\n")
+
+# Get DoRothEA database
+dorothea_hs <- dorothea::dorothea_hs
+
+dorothea_tf <- dorothea_hs %>%
+  dplyr::filter(confidence %in% c("A", "B")) %>%
+  dplyr::select(tf, target) %>%
+  dplyr::distinct()
+
+# Convert to clusterProfiler format with proper column selection
+dorothea_t2g <- dorothea_tf %>%
+  dplyr::select(tf, target) %>%  # Maintain consistency
+  dplyr::rename(TERM = tf, GENE = target)
+
+# Convert gene symbols to ENTREZID for DoRothEA
+gene_mapping <- bitr(dorothea_t2g$GENE, 
+                    fromType = "SYMBOL", 
+                    toType = "ENTREZID",
+                    OrgDb = OrgDb)
+
+dorothea_t2g_entrez <- dorothea_t2g %>%
+  dplyr::left_join(gene_mapping, by = c("GENE" = "SYMBOL")) %>%
+  dplyr::filter(!is.na(ENTREZID)) %>%
+  dplyr::select(TERM, ENTREZID) %>%
+  dplyr::rename(GENE = ENTREZID)
+
+dorothea_comparison <- compareCluster(
+  geneCluster = deg_list_entrez,
+  fun = "enricher",
+  TERM2GENE = dorothea_t2g_entrez,
+  pvalueCutoff = 0.05,
+  pAdjustMethod = "BH",
+  qvalueCutoff = 0.2
+)
+
+cat("All enrichment analyses completed!\n")
+```
+
+# =============================================================================
+# 5. EXTRACT SIGNIFICANT PATHWAYS FROM ALL DATABASES
+# =============================================================================
+
+```{r}
+# Function to extract significant pathways with database label
+extract_pathways_with_db <- function(comparison_result, db_name, pvalue_cutoff = 0.05) {
+  df <- as.data.frame(comparison_result)
+  if(nrow(df) == 0) return(data.frame())
+  
+  sig_pathways <- df[df$p.adjust < pvalue_cutoff, ]
+  if(nrow(sig_pathways) == 0) return(data.frame())
+  
+  # Add database information
+  sig_pathways$Database <- db_name
+  sig_pathways$Pathway_DB <- paste0(db_name, ": ", sig_pathways$Description)
+  
+  return(sig_pathways)
+}
+```
+
+```{r}
+# Extract pathways from all databases
+go_pathways_df <- extract_pathways_with_db(go_comparison, "GO")
+kegg_pathways_df <- extract_pathways_with_db(kegg_comparison, "KEGG")
+reactome_pathways_df <- extract_pathways_with_db(reactome_comparison, "Reactome")
+hallmarks_pathways_df <- extract_pathways_with_db(hallmarks_comparison, "Hallmarks")
+dorothea_pathways_df <- extract_pathways_with_db(dorothea_comparison, "DoRothEA_TF")
+
+# Combine all pathway results
+all_pathways_df <- bind_rows(
+  go_pathways_df,
+  kegg_pathways_df,
+  reactome_pathways_df,
+  hallmarks_pathways_df,
+  dorothea_pathways_df
+)
+
+# Save combined results
+write.csv(all_pathways_df, "all_enrichment_results.csv", row.names = FALSE)
+
+cat("Combined pathway results saved to: all_enrichment_results.csv\n")
+```
+
+# =============================================================================
+# 6. CREATE COMBINED UPSET PLOT FOR ALL DATABASES
+# =============================================================================
+```{r}
+cat("\n=== CREATING COMBINED UPSET PLOTS ===\n")
+```
+
+```{r}
+# Create a list of all your pathway lists
+pathway_list_collection <- list(
+  go_pathway_list,
+  kegg_pathway_list,
+  reactome_pathway_list,
+  hallmarks_pathway_list,
+  dorothea_pathway_list
+)
+
+# Get all unique condition names
+all_conditions <- unique(unlist(lapply(pathway_list_collection, names)))
+
+# Combine pathways for each condition
+all_pathway_lists <- setNames(
+  lapply(all_conditions, function(condition) {
+    pathways <- unlist(lapply(pathway_list_collection, function(x) x[[condition]]))
+    unique(pathways[!is.na(pathways)])
+  }),
+  all_conditions
+)
+
+```
+
+
+```{r}
+# Create combined UpSet plot for pathways
+if(length(all_pathway_lists) > 1) {
+  
+  # Create binary matrix for all pathways
+  all_pathways_upset <- fromList(all_pathway_lists)
+  
+  # Enhanced UpSet plot for pathways
+  upset_all_pathways <- upset(
+    all_pathways_upset,
+    sets = names(all_pathway_lists),
+    order.by = "freq",
+    nsets = length(all_pathway_lists),
+    nintersects = 50,
+    main.bar.color = "forestgreen",
+    matrix.color = "darkblue",
+    text.scale = c(1.2, 1.2, 1.0, 1.0, 1.4, 1.0),
+    point.size = 3,
+    line.size = 1
+  )
+  
+  # Save combined pathway UpSet plot
+  jpeg("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/compare/combined_pathways_upset.jpg", 
+       width=16, height=12, units="in", res=300)
+  print(upset_all_pathways)
+  dev.off()
+  
+  png("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/compare/combined_pathways_upset.png", 
+      width=16, height=12, units="in", res=300)
+  print(upset_all_pathways)
+  dev.off()
+  
+  cat("Combined pathways UpSet plot saved!\n")
+}
+```
+
+# =============================================================================
+# 7. EXTRACT AND SAVE INTERSECTION DATA
+# =============================================================================
+```{r}
+cat("\n=== EXTRACTING INTERSECTION DATA ===\n")
+```
+
+```{r}
+
+# Function to extract intersection members from UpSet data
+extract_upset_intersections <- function(pathway_lists, intersection_name = "pathways") {
+  
+  # Create binary matrix
+  binary_matrix <- fromList(pathway_lists)
+  
+  # Get all possible intersections
+  intersections_data <- list()
+  
+  # Get individual set members (unique to each set)
+  for(set_name in names(pathway_lists)) {
+    unique_pathways <- setdiff(pathway_lists[[set_name]], 
+                              unlist(pathway_lists[names(pathway_lists) != set_name]))
+    
+    if(length(unique_pathways) > 0) {
+      intersections_data[[set_name]] <- data.frame(
+        Intersection = set_name,
+        Pathway = unique_pathways,
+        Type = "Unique",
+        Database = sapply(strsplit(unique_pathways, ": "), `[`, 1),
+        Description = sapply(strsplit(unique_pathways, ": "), function(x) paste(x[-1], collapse = ": ")),
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+  
+  # Get pairwise intersections
+  set_names <- names(pathway_lists)
+  for(i in 1:(length(set_names)-1)) {
+    for(j in (i+1):length(set_names)) {
+      set1 <- set_names[i]
+      set2 <- set_names[j]
+      
+      common_pathways <- intersect(pathway_lists[[set1]], pathway_lists[[set2]])
+      
+      if(length(common_pathways) > 0) {
+        intersection_name <- paste(set1, set2, sep = " & ")
+        intersections_data[[intersection_name]] <- data.frame(
+          Intersection = intersection_name,
+          Pathway = common_pathways,
+          Type = "Pairwise",
+          Database = sapply(strsplit(common_pathways, ": "), `[`, 1),
+          Description = sapply(strsplit(common_pathways, ": "), function(x) paste(x[-1], collapse = ": ")),
+          stringsAsFactors = FALSE
+        )
+      }
+    }
+  }
+  
+  # Combine all intersection data
+  if(length(intersections_data) > 0) {
+    intersections_df <- do.call(rbind, intersections_data)
+    rownames(intersections_df) <- NULL
+    return(intersections_df)
+  } else {
+    return(data.frame())
+  }
+}
+
+```
+
+```{r}
+# Extract intersection data for all pathways
+pathway_intersections <- extract_upset_intersections(all_pathway_lists, "all_databases")
+
+# Save intersection data
+if(nrow(pathway_intersections) > 0) {
+  write.csv(pathway_intersections, "pathway_intersections_data.csv", row.names = FALSE)
+  cat("Pathway intersection data saved to: pathway_intersections_data.csv\n")
+  
+  # Print summary
+  cat("\nIntersection Summary:\n")
+  intersection_summary <- pathway_intersections %>%
+    group_by(Intersection, Type, Database) %>%
+    summarise(Count = n(), .groups = 'drop') %>%
+    arrange(desc(Count))
+  
+  print(intersection_summary)
+  write.csv(intersection_summary, "intersection_summary.csv", row.names = FALSE)
+}
+```
+
+# =============================================================================
+# 8. EXTRACT GENE-LEVEL INTERSECTIONS
+# =============================================================================
+```{r}
+cat("\n=== EXTRACTING GENE-LEVEL INTERSECTIONS ===\n")
+```
+
+```{r}
+# Function to extract genes from pathway intersections
+extract_gene_intersections <- function(deg_list_entrez, all_pathways_df) {
+  
+  gene_intersections <- list()
+  
+  # Get unique genes for each cluster
+  for(cluster_name in names(deg_list_entrez)) {
+    cluster_genes <- deg_list_entrez[[cluster_name]]
+    
+    # Find unique genes (genes only in this cluster)
+    other_clusters <- deg_list_entrez[names(deg_list_entrez) != cluster_name]
+    unique_genes <- setdiff(cluster_genes, unlist(other_clusters))
+    
+    if(length(unique_genes) > 0) {
+      gene_intersections[[cluster_name]] <- data.frame(
+        Intersection = cluster_name,
+        Gene_ENTREZID = unique_genes,
+        Type = "Unique",
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+  
+  # Get pairwise gene intersections
+  cluster_names <- names(deg_list_entrez)
+  for(i in 1:(length(cluster_names)-1)) {
+    for(j in (i+1):length(cluster_names)) {
+      cluster1 <- cluster_names[i]
+      cluster2 <- cluster_names[j]
+      
+      common_genes <- intersect(deg_list_entrez[[cluster1]], deg_list_entrez[[cluster2]])
+      
+      if(length(common_genes) > 0) {
+        intersection_name <- paste(cluster1, cluster2, sep = " & ")
+        gene_intersections[[intersection_name]] <- data.frame(
+          Intersection = intersection_name,
+          Gene_ENTREZID = common_genes,
+          Type = "Pairwise",
+          stringsAsFactors = FALSE
+        )
+      }
+    }
+  }
+  
+  # Combine all gene intersection data
+  if(length(gene_intersections) > 0) {
+    gene_intersections_df <- do.call(rbind, gene_intersections)
+    rownames(gene_intersections_df) <- NULL
+    
+    # Add gene symbols
+    gene_symbols <- bitr(gene_intersections_df$Gene_ENTREZID,
+                        fromType = "ENTREZID",
+                        toType = "SYMBOL",
+                        OrgDb = OrgDb)
+    
+    gene_intersections_df <- gene_intersections_df %>%
+      left_join(gene_symbols, by = c("Gene_ENTREZID" = "ENTREZID"))
+    
+    return(gene_intersections_df)
+  } else {
+    return(data.frame())
+  }
+}
+```
+
+```{r}
+# Extract gene intersections
+gene_intersections_df <- extract_gene_intersections(deg_list_entrez, all_pathways_df)
+
+# Save gene intersection data
+if(nrow(gene_intersections_df) > 0) {
+  write.csv(gene_intersections_df, "gene_intersections_data.csv", row.names = FALSE)
+  cat("Gene intersection data saved to: gene_intersections_data.csv\n")
+  
+  # Print gene intersection summary
+  cat("\nGene Intersection Summary:\n")
+  gene_summary <- gene_intersections_df %>%
+    group_by(Intersection, Type) %>%
+    summarise(Gene_Count = n(), .groups = 'drop') %>%
+    arrange(desc(Gene_Count))
+  
+  print(gene_summary)
+  write.csv(gene_summary, "gene_intersection_summary.csv", row.names = FALSE)
+}
+```
+
+```{r}
+# Create Excel workbook
+wb <- createWorkbook()
+
+# Add gene intersections worksheet
+addWorksheet(wb, "Gene_Intersections")
+writeData(wb, sheet = "Gene_Intersections", gene_intersections_df)
+
+# Add pathway intersections worksheet
+addWorksheet(wb, "Pathway_Intersections")
+writeData(wb, sheet = "Pathway_Intersections", pathway_intersections)
+
+# Save workbook to file
+saveWorkbook(wb, "intersections_data.xlsx", overwrite = TRUE)
+
+# Confirmation message
+cat("Excel file 'intersections_data.xlsx' created with 2 worksheets:\n",
+    "1. Gene_Intersections\n",
+    "2. Pathway_Intersections")
+```
+
+
+# =============================================================================
+# 9. CREATE INDIVIDUAL VISUALIZATIONS FOR EACH DATABASE
+# =============================================================================
+```{r}
+
+cat("\n=== CREATING INDIVIDUAL VISUALIZATIONS ===\n")
+```
+
+```{r}
+# Function to create dotplots for each database
+# Function to create combined dotplot using native clusterProfiler dotplot
+create_combined_dotplot <- function() {
+  
+  library(dplyr)
+  
+  # List of databases with their results
+  databases <- list(
+    "GO" = go_comparison,
+    "KEGG" = kegg_comparison,
+    "Reactome" = reactome_comparison,
+    "Hallmarks" = hallmarks_comparison,
+    "DoRothEA_TF" = dorothea_comparison
+  )
+  
+  # Extract and combine data from all databases
+  combined_data <- data.frame()
+  
+  for(db_name in names(databases)) {
+    if(!is.null(databases[[db_name]]) && nrow(as.data.frame(databases[[db_name]])) > 0) {
+      
+      # Convert to data frame and add database identifier
+      db_df <- as.data.frame(databases[[db_name]])
+      
+      # Modify cluster names to include database
+      db_df$Cluster <- paste(db_df$Cluster, db_name, sep = "_")
+      
+      # Combine data
+      if(nrow(combined_data) == 0) {
+        combined_data <- db_df
+      } else {
+        combined_data <- bind_rows(combined_data, db_df)
+      }
+    }
+  }
+  
+  if(nrow(combined_data) > 0) {
+    
+    # Create a new compareClusterResult-like object
+    # First, ensure we have the required columns and structure
+    combined_data <- combined_data %>%
+      arrange(p.adjust) %>%
+      group_by(Cluster) %>%
+      slice_head(n = 5) %>%  # Top 5 per cluster-database combination
+      ungroup()
+    
+    # Convert back to compareClusterResult format
+    # This is a bit hacky but works with clusterProfiler
+    class(combined_data) <- c("compareClusterResult", "data.frame")
+    
+    # Create dotplot using native clusterProfiler function
+    p <- dotplot(combined_data, 
+                 showCategory = 5,
+                 title = "Combined Pathway Enrichment (All Databases)",
+                 font.size = 9) +
+         theme(axis.text.y = element_text(size = 8),
+               axis.text.x = element_text(angle = 45, hjust = 1, size = 8))
+    
+    # Save plot
+    save_plot_enhanced(p, "dotplot_combined_all_databases", width = 16, height = 12)
+    
+    cat("Combined dotplot saved using native clusterProfiler function!\n")
+  } else {
+    cat("No data available for combined dotplot.\n")
+  }
+}
+
+# Create combined dotplot
+create_combined_dotplot()
+```
+
+# =============================================================================
+# 10. FINAL SUMMARY AND SESSION INFO
+# =============================================================================
+```{r}
+cat("\n=== ANALYSIS SUMMARY ===\n")
+```
+
+```{r}
+# Create comprehensive summary
+analysis_summary <- data.frame(
+  Database = c("GO_BP", "KEGG", "Reactome", "Hallmarks", "DoRothEA_TF"),
+  Total_Terms = c(
+    nrow(as.data.frame(go_comparison)),
+    nrow(as.data.frame(kegg_comparison)),
+    nrow(as.data.frame(reactome_comparison)),
+    nrow(as.data.frame(hallmarks_comparison)),
+    nrow(as.data.frame(dorothea_comparison))
+  ),
+  Significant_Terms = c(
+    nrow(go_pathways_df),
+    nrow(kegg_pathways_df),
+    nrow(reactome_pathways_df),
+    nrow(hallmarks_pathways_df),
+    nrow(dorothea_pathways_df)
+  )
+)
+
+print(analysis_summary)
+write.csv(analysis_summary, "analysis_summary_by_database.csv", row.names = FALSE)
+
+# Save session information for reproducibility
+session_info <- sessionInfo()
+sink("analysis_session_info.txt")
+cat("=== EXPANDED PATHWAY ENRICHMENT ANALYSIS SESSION INFO ===\n\n")
+cat("Analysis Date:", as.character(Sys.Date()), "\n")
+cat("Analysis Time:", as.character(Sys.time()), "\n\n")
+print(session_info)
+sink()
+
+cat("\n=== ANALYSIS COMPLETED SUCCESSFULLY! ===\n")
+cat("Files generated:\n")
+cat("- all_enrichment_results.csv: Combined results from all databases\n")
+cat("- pathway_intersections_data.csv: Pathway-level intersections\n")
+cat("- gene_intersections_data.csv: Gene-level intersections\n")
+cat("- intersection_summary.csv: Summary of pathway intersections\n")
+cat("- gene_intersection_summary.csv: Summary of gene intersections\n")
+cat("- analysis_summary_by_database.csv: Overall analysis summary\n")
+cat("- enrichment_plots/: Directory with all plots (JPG, PNG, PDF)\n")
+cat("- analysis_session_info.txt: Reproducibility information\n")
+```

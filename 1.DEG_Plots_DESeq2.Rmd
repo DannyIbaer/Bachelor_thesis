@@ -1,0 +1,1321 @@
+---
+title: "1.DEG_Plots_DESeq2"
+author: "Daniel Bernad Ibáñez"
+date: "2025-04-22"
+output: html_document
+---
+
+```{r, include=FALSE, echo=FALSE, results='hide'}
+# Function to install and load packages
+install_and_load <- function(packages) {
+  # Detect Bioconductor packages
+  bioc_packages <- c(
+    "DESeq2", "sva", "edgeR", "limma", "tximport", 
+    "biomaRt", "clusterProfiler", "org.Hs.eg.db", "EnsDb.Hsapiens.v86", "AnnotationDbi","EnhancedVolcano"
+  )
+  
+  for (pkg in packages) {
+    if (!require(pkg, character.only = TRUE)) {
+      if (pkg %in% bioc_packages) {
+        # Install BiocManager if not available
+        if (!requireNamespace("BiocManager", quietly = TRUE)) {
+          install.packages("BiocManager")
+        }
+        BiocManager::install(pkg, update = FALSE, ask = FALSE)
+      } else {
+        install.packages(pkg, dependencies = TRUE)
+      }
+      library(pkg, character.only = TRUE)
+    }
+  }
+}
+```
+
+```{r}
+# List of required packages
+required_packages <- c(
+  "BiocManager", "readr", "ggplot2", "tximport", "DESeq2", "edgeR", 
+  "biomaRt", "plotly", "tidyverse", "EnhancedVolcano", "factoextra", 
+  "paran", "clusterProfiler", "org.Hs.eg.db", "EnsDb.Hsapiens.v86",
+  "sva", "limma", "dplyr", "pheatmap", "RColorBrewer", 
+  "cluster", "corrplot", "gridExtra","AnnotationDbi"
+)
+```
+
+```{r}
+# Install and load packages
+cat("Installing and loading libraries...\n")
+install_and_load(required_packages)
+```
+
+```{r}
+colData <- read.csv("C:/Users/Usuario/Desktop/colData_filtered_with_clusters.csv", row.names = 1)
+
+txi_gene_filtered <- readRDS("C:/Users/Usuario/Desktop/txi_gene_filtered_export.rds")
+```
+
+```{r}
+filtered_gsms <- colData$GSM
+
+mapping <- read.csv("C:/Users/Usuario/Desktop/srr_data_output.csv")
+
+filtered_srrs <- mapping$RUN[mapping$GSM %in% filtered_gsms]
+
+txi_gene_filtered$counts <- txi_gene_filtered$counts[, filtered_srrs]
+txi_gene_filtered$abundance <- txi_gene_filtered$abundance[, filtered_srrs]
+txi_gene_filtered$length <- txi_gene_filtered$length[, filtered_srrs]
+```
+
+
+```{r}
+design_formula <- "~ SV1 + SV2 + GSE + cluster"
+
+dds_gene_cluster <- DESeqDataSetFromTximport(
+    txi = txi_gene_filtered,
+    colData = colData,
+    design = as.formula(design_formula)
+  )
+# Filtrado de genes con edgeR's cpm
+cpm_counts <- cpm(counts(dds_gene_cluster ))
+keep <- rowSums(cpm_counts > 1) >= floor(0.1 * ncol(dds_gene_cluster ))
+dds_gene_cluster  <- dds_gene_cluster [keep, ]
+
+cat("Genes después del filtrado CPM:", nrow(dds_gene), "\n")
+
+dds_gene_cluster  <- DESeq(dds_gene_cluster )
+  
+design_formula <- "~ SV1 + SV2 + GSE + Cond"
+
+dds_gene <- DESeqDataSetFromTximport(
+    txi = txi_gene_filtered,
+    colData = colData,
+    design = as.formula(design_formula)
+  )
+
+# Filtrado de genes con edgeR's cpm
+cpm_counts <- cpm(counts(dds_gene))
+keep <- rowSums(cpm_counts > 1) >= floor(0.1 * ncol(dds_gene))
+dds_gene <- dds_gene[keep, ]
+
+cat("Genes después del filtrado CPM:", nrow(dds_gene), "\n")
+
+
+dds_gene <- DESeq(dds_gene)
+```
+
+
+##.......................................................ACTIVATION VS CONTROL.......................................................
+
+We take the results of our dds object for this comparison.
+```{r}
+# Store the results of the Activation vs Control comparison
+res_gene_act <- results(dds_gene, contrast = c("Cond", "Activation", "Control"))
+
+# Visualize the distribution of log2FoldChange
+hist(res_gene_act$log2FoldChange, breaks=50, main="Distribution of LFC (Control vs Activation)", xlab="Log2 Fold Change")
+
+# MA plot
+DESeq2::plotMA(res_gene_act , ylim = c(-20, 20))
+
+# Volcano plot 
+volcano_data <- as.data.frame(res_gene_act)
+volcano_data$significant <- volcano_data$padj < 0.05
+
+# Basic volcano plot
+plot(volcano_data$log2FoldChange, -log10(volcano_data$padj), 
+     col = ifelse(volcano_data$significant, "red", "black"), 
+     pch = 20, xlab = "Log2 Fold Change", ylab = "-Log10 p-value")
+```
+
+Get gene symbols so we can actually tell what genes are differentially expressed.
+```{r}
+# Annotation: extract ensemble ID and create a tx2 item with the mappings from ensemble ID to gene symbols.
+tx_ids <- rownames(dds_gene)
+
+tx2gene <- AnnotationDbi::select(EnsDb.Hsapiens.v86, 
+                  keys = tx_ids, 
+                  columns = c("GENENAME"), 
+                  keytype = "GENEID")
+
+# Ensure dataframe format to manipulate its columns freely
+res_gene_act<- as.data.frame(res_gene_act)
+res_gene_act$GENEID <- tx_ids
+
+#Add gene symbols
+res_gene_act_annotated <- merge(res_gene_act, tx2gene, by = "GENEID", all.x = TRUE)
+res_gene_act_annotated
+
+# Export the data frame to a CSV file
+write.csv(res_gene_act_annotated, file = "res_gene_act_annotated.csv", row.names = FALSE)
+
+library(writexl)
+# Export to an Excel file
+write_xlsx(res_gene_act_annotated, path = "C:/Users/Usuario/Documents/res_gene_act_annotated.xlsx")
+```
+
+### ComplexVolcano
+```{r}
+# Filter genes with adjusted p-value < 0.05
+significant_res_act_annotated <- res_gene_act_annotated[which(res_gene_act_annotated$padj < 0.05), ]
+
+# Check how many significant genes you have
+nrow(significant_res_act_annotated)
+
+# Visualize the distribution of log2FoldChange
+hist(significant_res_act_annotated$log2FoldChange, breaks=50, main="Distribution of LFC (Control vs Activation)", xlab="Log2 Fold Change")
+
+library(EnhancedVolcano)
+# Volcano plot
+png("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/volcano_act.png", width = 2000, height = 1600, res = 300)
+
+EnhancedVolcano(
+  significant_res_act_annotated,
+  lab =  significant_res_act_annotated$GENENAME,  # Use gene names as labels
+  x = 'log2FoldChange',  # Log2 fold change column
+  y = 'pvalue',  # P-value column
+  labSize = 3.0,  # Label size
+  pCutoff = 1e-02,  # P-value cutoff for significance
+  title = 'Control vs Activation',  # Plot title
+  legendPosition = 'right',  # Legend position
+  drawConnectors = TRUE,  # Connectors for labels
+  max.overlaps = 30  # Max number of overlapping labels
+)
+
+# Close the device
+dev.off()
+```
+
+### Heatmap
+```{r}
+if (!requireNamespace("ComplexHeatmap", quietly = TRUE)) BiocManager::install("ComplexHeatmap")
+library(ComplexHeatmap)
+
+up_act <- significant_res_act_annotated[which(significant_res_act_annotated$log2FoldChange > 1), ]
+down_act <- significant_res_act_annotated[which(significant_res_act_annotated$log2FoldChange < -1), ]
+
+# Sort table by baseMean in ascending order
+up_act_sorted <- up_act[order(up_act$baseMean),]
+down_act_sorted <- down_act[order(down_act$baseMean),]
+
+#Calculate total number of rows (genes)
+n <- nrow(up_act_sorted)
+m <- nrow(down_act_sorted)
+
+# Find median
+median_posup <- ceiling(n / 2)
+median_posdown <- ceiling(m / 2)
+
+# Calculate Q1 position of the median
+q1_of_medianup <- ceiling ((median_posup + 1)/4)
+q1_of_mediandown <- ceiling ((median_posdown + 1)/4)
+
+# Filter out low baseMean genes
+up_act_filtered <- up_act_sorted[which(up_act_sorted$baseMean >= q1_of_medianup), ]
+down_act_filtered <- down_act_sorted[which(down_act_sorted$baseMean >= q1_of_mediandown), ]
+
+# Sort by log2FoldChange descending for up and ascending for down
+up_act_top <- up_act_filtered [order(up_act_filtered $log2FoldChange, decreasing = TRUE),]
+down_act_top <- down_act_filtered[order(down_act_filtered$log2FoldChange, decreasing = FALSE),]
+
+# Take top 30 from each
+top30_act_up <- head(up_act_top, 30)
+top30_act_down <- head(down_act_top, 30)
+
+# Combine into one data frame
+genes_top <- rbind(top30_act_up, top30_act_down)
+```
+
+```{r}
+# Check for duplicates in GENEID
+num_duplicates <- sum(duplicated(genes_top$GENEID))
+
+# Report how many were found
+cat("Number of duplicated GENEIDs in genes_top: ", num_duplicates, "\n")
+
+# If there are any, show them
+if (num_duplicates > 0) {
+  cat("Duplicated GENEIDs:\n")
+  print(unique(genes_top$GENEID[duplicated(genes_top$GENEID)]))
+}
+
+# Remove duplicates and set rownames
+genes_top <- genes_top[!duplicated(genes_top$GENEID), ]
+rownames(genes_top) <- genes_top$GENEID
+
+# Filter colData for Control and Activation only
+keep_samples <- rownames(colData)[colData$Cond %in% c("Control", "Activation")]
+filtered_colData <- colData[keep_samples, ]
+
+# Get normalized VST counts
+vst_out <- vst(dds_gene, blind=FALSE)
+# Subset to significant genes and filtered samples
+mat <- assay(vst_out)[rownames(genes_top), keep_samples]
+
+# Scale (Z-score)
+mat.scaled <- t(apply(mat, 1, scale))
+colnames(mat.scaled) <- colnames(mat)
+
+# Select top/bottom genes
+num_keep <- 25
+rows_keep <- c(seq(1, num_keep), seq((nrow(mat.scaled) - num_keep + 1), nrow(mat.scaled)))
+
+# Get log2FC and baseMean for heatmap annotations
+l2_val <- as.matrix(genes_top[rows_keep,]$log2FoldChange)
+colnames(l2_val) <- "logFC"
+
+mean <- as.matrix(genes_top[rows_keep,]$baseMean)
+colnames(mean) <- "AveExpr"
+
+# Color functions
+library(circlize)
+col_logFC <- colorRamp2(c(min(l2_val), 0, max(l2_val)), c("blue", "white", "red"))
+col_AveExpr <- colorRamp2(c(quantile(mean)[1], quantile(mean)[4]), c("white", "red"))
+
+# Define colors for conditions
+cond_colors <- c("Dysfunction" = "purple", 
+                 "Control" = "pink", 
+                 "endMT" = "#33a02c", 
+                 "Activation" = "#ff7f00")
+
+# Create condition annotation for filtered samples
+cond_ha <- HeatmapAnnotation(
+  Condition = filtered_colData$Cond,
+  col = list(Condition = cond_colors),
+  show_annotation_name = TRUE
+)
+
+# Extra summary annotation (optional)
+ha <- HeatmapAnnotation(summary = anno_summary(gp = gpar(fill = 2), 
+                                               height = unit(2, "cm")))
+
+# Load ComplexHeatmap
+library(ComplexHeatmap)
+
+# Heatmap 1: scaled expression
+h1 <- Heatmap(mat.scaled[rows_keep, ], cluster_rows = FALSE,  
+              show_column_names = FALSE, name = "Z-score",
+              cluster_columns = TRUE, 
+              top_annotation = cond_ha,
+              width = unit(10, "cm"))
+
+# Heatmap 2: logFC
+h2 <- Heatmap(l2_val, 
+              row_labels = genes_top$GENENAME[rows_keep],
+              cluster_rows = FALSE, 
+              name = "logFC", 
+              top_annotation = ha, 
+              col = col_logFC,
+              cell_fun = function(j, i, x, y, w, h, col) {
+                grid.text(round(l2_val[i, j], 2), x, y)
+              },
+              width = unit(1.5, "cm"))
+
+# Heatmap 3: mean expression
+h3 <- Heatmap(mean, 
+              row_labels = genes_top$GENENAME[rows_keep], 
+              cluster_rows = FALSE, 
+              name = "AveExpr", 
+              col = col_AveExpr,
+              cell_fun = function(j, i, x, y, w, h, col) {
+                grid.text(round(mean[i, j], 2), x, y)
+              },
+              width = unit(1.5, "cm"))
+
+# Combine heatmaps
+h <- h1 + h2 + h3
+
+png("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/HEATMAP_act.png", res = 300, width = 6000, height = 7500)
+print(h)
+dev.off()
+```
+
+##.......................................................DYSFUNCTION VS CONTROL.......................................................
+We take the results of our dds object for this comparison.
+```{r}
+# Store the results of the Activation vs Control comparison
+res_gene_dys <- results(dds_gene, contrast = c("Cond", "Dysfunction", "Control"))
+
+# Visualize the distribution of log2FoldChange
+hist(res_gene_dys$log2FoldChange, breaks=50, main="Distribution of LFC (Control vs Dysfunction)", xlab="Log2 Fold Change")
+
+# MA plot
+DESeq2::plotMA(res_gene_dys , ylim = c(-20, 20))
+
+# Volcano plot 
+volcano_data <- as.data.frame(res_gene_dys)
+volcano_data$significant <- volcano_data$padj < 0.05
+
+# Basic volcano plot
+plot(volcano_data$log2FoldChange, -log10(volcano_data$padj), 
+     col = ifelse(volcano_data$significant, "red", "black"), 
+     pch = 20, xlab = "Log2 Fold Change", ylab = "-Log10 p-value")
+```
+
+Get gene symbols so we can actually tell what genes are differentially expressed.
+```{r}
+# Annotation: extract ensemble ID and create a tx2 item with the mappings from ensemble ID to gene symbols.
+tx_ids <- rownames(dds_gene)
+
+tx2gene <- AnnotationDbi::select(EnsDb.Hsapiens.v86, 
+                  keys = tx_ids, 
+                  columns = c("GENENAME"), 
+                  keytype = "GENEID")
+
+# Ensure dataframe format to manipulate its columns freely
+res_gene_dys<- as.data.frame(res_gene_dys)
+res_gene_dys$GENEID <- tx_ids
+
+#Add gene symbols
+res_gene_dys_annotated <- merge(res_gene_dys, tx2gene, by = "GENEID", all.x = TRUE)
+res_gene_dys_annotated
+
+# Export the data frame to a CSV file
+write.csv(res_gene_dys_annotated, file = "res_gene_dys_annotated.csv", row.names = FALSE)
+
+library(writexl)
+# Export to an Excel file
+write_xlsx(res_gene_dys_annotated, path = "C:/Users/Usuario/Desktop/res_gene_dys_annotated.xlsx")
+```
+
+### CompleVolcano
+```{r}
+# Filter genes with adjusted p-value < 0.05
+significant_res_dys_annotated <- res_gene_dys_annotated[which(res_gene_dys_annotated$padj < 0.05), ]
+
+# Check how many significant genes you have
+nrow(significant_res_dys_annotated)
+
+# Visualize the distribution of log2FoldChange
+hist(significant_res_dys_annotated$log2FoldChange, breaks=50, main="Distribution of LFC (Control vs Activation)", xlab="Log2 Fold Change")
+
+# Volcano plot
+png("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/volcano_dys.png", width = 2000, height = 1600, res = 300)
+
+EnhancedVolcano(
+  significant_res_dys_annotated,
+  lab =  significant_res_dys_annotated$GENENAME,  # Use gene names as labels
+  x = 'log2FoldChange',  # Log2 fold change column
+  y = 'pvalue',  # P-value column
+  labSize = 3.0,  # Label size
+  pCutoff = 1e-02,  # P-value cutoff for significance
+  title = 'Control vs Dysfunction',  # Plot title
+  legendPosition = 'right',  # Legend position
+  drawConnectors = TRUE,  # Connectors for labels
+  max.overlaps = 30  # Max number of overlapping labels
+)
+
+dev.off()
+```
+
+### Heatmap
+```{r}
+if (!requireNamespace("ComplexHeatmap", quietly = TRUE)) BiocManager::install("ComplexHeatmap")
+library(ComplexHeatmap)
+
+up_dys <- significant_res_dys_annotated[which(significant_res_dys_annotated$log2FoldChange > 1), ]
+down_dys <- significant_res_dys_annotated[which(significant_res_dys_annotated$log2FoldChange < -1), ]
+
+# Sort table by baseMean in ascending order
+up_dys_sorted <- up_dys[order(up_dys$baseMean),]
+down_dys_sorted <- down_dys[order(down_dys$baseMean),]
+
+#Calculate total number of rows (genes)
+n <- nrow(up_dys_sorted)
+m <- nrow(down_dys_sorted)
+
+# Find median
+median_posup <- ceiling(n / 2)
+median_posdown <- ceiling(m / 2)
+
+# Calculate Q1 position of the median
+q1_of_medianup <- ceiling ((median_posup + 1)/4)
+q1_of_mediandown <- ceiling ((median_posdown + 1)/4)
+
+# Filter out low baseMean genes
+up_dys_filtered <- up_dys_sorted[which(up_dys_sorted$baseMean >= q1_of_medianup), ]
+down_dys_filtered <- down_dys_sorted[which(down_dys_sorted$baseMean >= q1_of_mediandown), ]
+
+# Sort by log2FoldChange descending for up and ascending for down
+up_dys_top <- up_dys_filtered [order(up_dys_filtered $log2FoldChange, decreasing = TRUE),]
+down_dys_top <- down_dys_filtered[order(down_dys_filtered$log2FoldChange, decreasing = FALSE),]
+
+# Take top 30 from each
+top30_dys_up <- head(up_dys_top, 30)
+top30_dys_down <- head(down_dys_top, 30)
+
+# Combine into one data frame
+genes_top <- rbind(top30_dys_up, top30_dys_down)
+```
+
+```{r}
+# Check for duplicates in GENEID
+num_duplicates <- sum(duplicated(genes_top$GENEID))
+
+# Report how many were found
+cat("Number of duplicated GENEIDs in genes_top: ", num_duplicates, "\n")
+
+# If there are any, show them
+if (num_duplicates > 0) {
+  cat("Duplicated GENEIDs:\n")
+  print(unique(genes_top$GENEID[duplicated(genes_top$GENEID)]))
+}
+
+# Remove duplicates and set rownames
+genes_top <- genes_top[!duplicated(genes_top$GENEID), ]
+rownames(genes_top) <- genes_top$GENEID
+
+# Filter colData for Control and Activation only
+keep_samples <- rownames(colData)[colData$Cond %in% c("Control", "Dysfunction")]
+filtered_colData <- colData[keep_samples, ]
+
+# Get normalized VST counts
+vst_out <- vst(dds_gene, blind=FALSE)
+# Subset to significant genes and filtered samples
+mat <- assay(vst_out)[rownames(genes_top), keep_samples]
+
+# Scale (Z-score)
+mat.scaled <- t(apply(mat, 1, scale))
+colnames(mat.scaled) <- colnames(mat)
+
+# Select top/bottom genes
+num_keep <- 25
+rows_keep <- c(seq(1, num_keep), seq((nrow(mat.scaled) - num_keep + 1), nrow(mat.scaled)))
+
+# Get log2FC and baseMean for heatmap annotations
+l2_val <- as.matrix(genes_top[rows_keep,]$log2FoldChange)
+colnames(l2_val) <- "logFC"
+
+mean <- as.matrix(genes_top[rows_keep,]$baseMean)
+colnames(mean) <- "AveExpr"
+
+# Color functions
+library(circlize)
+col_logFC <- colorRamp2(c(min(l2_val), 0, max(l2_val)), c("blue", "white", "red"))
+col_AveExpr <- colorRamp2(c(quantile(mean)[1], quantile(mean)[4]), c("white", "red"))
+
+# Define colors for conditions
+cond_colors <- c("Dysfunction" = "purple", 
+                 "Control" = "pink", 
+                 "endMT" = "#33a02c", 
+                 "Activation" = "#ff7f00")
+
+# Create condition annotation for filtered samples
+cond_ha <- HeatmapAnnotation(
+  Condition = filtered_colData$Cond,
+  col = list(Condition = cond_colors),
+  show_annotation_name = TRUE
+)
+
+# Extra summary annotation (optional)
+ha <- HeatmapAnnotation(summary = anno_summary(gp = gpar(fill = 2), 
+                                               height = unit(2, "cm")))
+
+# Load ComplexHeatmap
+library(ComplexHeatmap)
+
+# Heatmap 1: scaled expression
+h1 <- Heatmap(mat.scaled[rows_keep, ], cluster_rows = FALSE,  
+              show_column_names = FALSE, name = "Z-score",
+              cluster_columns = TRUE, 
+              top_annotation = cond_ha,
+              width = unit(10, "cm"))
+
+# Heatmap 2: logFC
+h2 <- Heatmap(l2_val, 
+              row_labels = genes_top$GENENAME[rows_keep],
+              cluster_rows = FALSE, 
+              name = "logFC", 
+              top_annotation = ha, 
+              col = col_logFC,
+              cell_fun = function(j, i, x, y, w, h, col) {
+                grid.text(round(l2_val[i, j], 2), x, y)
+              },
+              width = unit(1.5, "cm"))
+
+# Heatmap 3: mean expression
+h3 <- Heatmap(mean, 
+              row_labels = genes_top$GENENAME[rows_keep], 
+              cluster_rows = FALSE, 
+              name = "AveExpr", 
+              col = col_AveExpr,
+              cell_fun = function(j, i, x, y, w, h, col) {
+                grid.text(round(mean[i, j], 2), x, y)
+              },
+              width = unit(1.5, "cm"))
+
+# Combine heatmaps
+h <- h1 + h2 + h3
+
+png("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/HEATMAP_dys.png", res = 300, width = 6000, height = 7500)
+print(h)
+dev.off()
+```
+
+##.......................................................ENDMT VS CONTROL.......................................................
+We take the results of our dds object for this comparison.
+```{r}
+# Store the results of the Activation vs Control comparison
+res_gene_endMT <- results(dds_gene, contrast = c("Cond", "endMT", "Control"))
+
+# Visualize the distribution of log2FoldChange
+hist(res_gene_endMT$log2FoldChange, breaks=50, main="Distribution of LFC (Control vs endMT)", xlab="Log2 Fold Change")
+
+# MA plot
+DESeq2::plotMA(res_gene_endMT , ylim = c(-20, 20))
+
+# Volcano plot 
+volcano_data <- as.data.frame(res_gene_dys)
+volcano_data$significant <- volcano_data$padj < 0.05
+
+# Basic volcano plot
+plot(volcano_data$log2FoldChange, -log10(volcano_data$padj), 
+     col = ifelse(volcano_data$significant, "red", "black"), 
+     pch = 20, xlab = "Log2 Fold Change", ylab = "-Log10 p-value")
+```
+
+Get gene symbols so we can actually tell what genes are differentially expressed.
+```{r}
+# Annotation: extract ensemble ID and create a tx2 item with the mappings from ensemble ID to gene symbols.
+tx_ids <- rownames(dds_gene)
+
+tx2gene <- AnnotationDbi::select(EnsDb.Hsapiens.v86, 
+                  keys = tx_ids, 
+                  columns = c("GENENAME"), 
+                  keytype = "GENEID")
+
+# Ensure dataframe format to manipulate its columns freely
+res_gene_endMT<- as.data.frame(res_gene_endMT)
+res_gene_endMT$GENEID <- tx_ids
+
+#Add gene symbols
+res_gene_endMT_annotated <- merge(res_gene_endMT, tx2gene, by = "GENEID", all.x = TRUE)
+res_gene_endMT_annotated
+
+# Export the data frame to a CSV file
+write.csv(res_gene_endMT_annotated, file = "res_gene_endMT_annotated.csv", row.names = FALSE)
+
+library(writexl)
+# Export to an Excel file
+write_xlsx(res_gene_endMT_annotated, path = "C:/Users/Usuario/Documents/res_gene_endMT_annotated.xlsx")
+```
+
+### CompleVolcano
+```{r}
+# Filter genes with adjusted p-value < 0.05
+significant_res_endMT_annotated <- res_gene_endMT_annotated[which(res_gene_endMT_annotated$padj < 0.05), ]
+
+# Check how many significant genes you have
+nrow(significant_res_endMT_annotated)
+
+# Visualize the distribution of log2FoldChange
+hist(significant_res_endMT_annotated$log2FoldChange, breaks=50, main="Distribution of LFC (Control vs Activation)", xlab="Log2 Fold Change")
+
+#Volcano Plot
+png("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/volcano_endMT.png", width = 2000, height = 1600, res = 300)
+
+EnhancedVolcano(
+  significant_res_endMT_annotated,
+  lab =  significant_res_endMT_annotated$GENENAME,  # Use gene names as labels
+  x = 'log2FoldChange',  # Log2 fold change column
+  y = 'pvalue',  # P-value column
+  labSize = 3.0,  # Label size
+  pCutoff = 1e-02,  # P-value cutoff for significance
+  title = 'Control vs Activation',  # Plot title
+  legendPosition = 'right',  # Legend position
+  drawConnectors = TRUE,  # Connectors for labels
+  max.overlaps = 30  # Max number of overlapping labels
+)
+
+dev.off()
+```
+
+### Heatmap
+```{r}
+if (!requireNamespace("ComplexHeatmap", quietly = TRUE)) BiocManager::install("ComplexHeatmap")
+library(ComplexHeatmap)
+
+up_endMT <- significant_res_endMT_annotated[which(significant_res_endMT_annotated$log2FoldChange > 1), ]
+down_endMT <- significant_res_endMT_annotated[which(significant_res_endMT_annotated$log2FoldChange < -1), ]
+
+# Sort table by baseMean in ascending order
+up_endMT_sorted <- up_endMT[order(up_act$baseMean),]
+down_endMT_sorted <- down_endMT[order(down_act$baseMean),]
+
+#Calculate total number of rows (genes)
+n <- nrow(up_endMT_sorted)
+m <- nrow(down_endMT_sorted)
+
+# Find median
+median_posup <- ceiling(n / 2)
+median_posdown <- ceiling(m / 2)
+
+# Calculate Q1 position of the median
+q1_of_medianup <- ceiling ((median_posup + 1)/4)
+q1_of_mediandown <- ceiling ((median_posdown + 1)/4)
+
+# Filter out low baseMean genes
+up_endMT_filtered <- up_endMT_sorted[which(up_endMT_sorted$baseMean >= q1_of_medianup), ]
+down_endMT_filtered <- down_endMT_sorted[which(down_endMT_sorted$baseMean >= q1_of_mediandown), ]
+
+# Sort by log2FoldChange descending for up and ascending for down
+up_endMT_top <- up_endMT_filtered [order(up_endMT_filtered $log2FoldChange, decreasing = TRUE),]
+down_endMT_top <- down_endMT_filtered[order(down_endMT_filtered$log2FoldChange, decreasing = FALSE),]
+
+# Take top 30 from each
+top30_endMT_up <- head(up_endMT_top, 30)
+top30_endMT_down <- head(down_endMT_top, 30)
+
+# Combine into one data frame
+genes_top <- rbind(top30_endMT_up, top30_endMT_down)
+```
+
+```{r}
+# Check for duplicates in GENEID
+num_duplicates <- sum(duplicated(genes_top$GENEID))
+
+# Report how many were found
+cat("Number of duplicated GENEIDs in genes_top: ", num_duplicates, "\n")
+
+# If there are any, show them
+if (num_duplicates > 0) {
+  cat("Duplicated GENEIDs:\n")
+  print(unique(genes_top$GENEID[duplicated(genes_top$GENEID)]))
+}
+
+# Remove duplicates and set rownames
+genes_top <- genes_top[!duplicated(genes_top$GENEID), ]
+rownames(genes_top) <- genes_top$GENEID
+
+# Filter colData for Control and Activation only
+keep_samples <- rownames(colData)[colData$Cond %in% c("Control", "endMT")]
+filtered_colData <- colData[keep_samples, ]
+
+# Get normalized VST counts
+vst_out <- vst(dds_gene, blind=FALSE)
+# Subset to significant genes and filtered samples
+mat <- assay(vst_out)[rownames(genes_top), keep_samples]
+
+# Scale (Z-score)
+mat.scaled <- t(apply(mat, 1, scale))
+colnames(mat.scaled) <- colnames(mat)
+
+# Select top/bottom genes
+num_keep <- 25
+rows_keep <- c(seq(1, num_keep), seq((nrow(mat.scaled) - num_keep + 1), nrow(mat.scaled)))
+
+# Get log2FC and baseMean for heatmap annotations
+l2_val <- as.matrix(genes_top[rows_keep,]$log2FoldChange)
+colnames(l2_val) <- "logFC"
+
+mean <- as.matrix(genes_top[rows_keep,]$baseMean)
+colnames(mean) <- "AveExpr"
+
+# Color functions
+library(circlize)
+col_logFC <- colorRamp2(c(min(l2_val), 0, max(l2_val)), c("blue", "white", "red"))
+col_AveExpr <- colorRamp2(c(quantile(mean)[1], quantile(mean)[4]), c("white", "red"))
+
+# Define colors for conditions
+cond_colors <- c("Dysfunction" = "purple", 
+                 "Control" = "pink", 
+                 "endMT" = "#33a02c", 
+                 "Activation" = "#ff7f00")
+
+# Create condition annotation for filtered samples
+cond_ha <- HeatmapAnnotation(
+  Condition = filtered_colData$Cond,
+  col = list(Condition = cond_colors),
+  show_annotation_name = TRUE
+)
+
+# Extra summary annotation (optional)
+ha <- HeatmapAnnotation(summary = anno_summary(gp = gpar(fill = 2), 
+                                               height = unit(2, "cm")))
+
+# Load ComplexHeatmap
+library(ComplexHeatmap)
+
+# Heatmap 1: scaled expression
+h1 <- Heatmap(mat.scaled[rows_keep, ], cluster_rows = FALSE,  
+              show_column_names = FALSE, name = "Z-score",
+              cluster_columns = TRUE, 
+              top_annotation = cond_ha,
+              width = unit(10, "cm"))
+
+# Heatmap 2: logFC
+h2 <- Heatmap(l2_val, 
+              row_labels = genes_top$GENENAME[rows_keep],
+              cluster_rows = FALSE, 
+              name = "logFC", 
+              top_annotation = ha, 
+              col = col_logFC,
+              cell_fun = function(j, i, x, y, w, h, col) {
+                grid.text(round(l2_val[i, j], 2), x, y)
+              },
+              width = unit(1.5, "cm"))
+
+# Heatmap 3: mean expression
+h3 <- Heatmap(mean, 
+              row_labels = genes_top$GENENAME[rows_keep], 
+              cluster_rows = FALSE, 
+              name = "AveExpr", 
+              col = col_AveExpr,
+              cell_fun = function(j, i, x, y, w, h, col) {
+                grid.text(round(mean[i, j], 2), x, y)
+              },
+              width = unit(1.5, "cm"))
+
+# Combine heatmaps
+h <- h1 + h2 + h3
+
+png("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/HEATMAP_endMT.png", res = 300, width = 6000, height = 7500)
+print(h)
+dev.off()
+```
+
+##.......................................................Control VS AF.......................................................
+We take the results of our dds object for this comparison.
+```{r}
+# Store the results of the Activation vs Control comparison
+res_gene_AF_annotated <- read.csv("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Data/AF/DEG_treatment__Endothelial II___dataC.csv")
+
+# Visualize the distribution of log2FoldChange
+hist(res_gene_AF_annotated$avg_log2FC, breaks=50, main="Distribution of LFC (Control vs AF)", xlab="Log2 Fold Change")
+
+# Volcano plot 
+volcano_data <- as.data.frame(res_gene_AF_annotated)
+volcano_data$significant <- volcano_data$p_val_adj < 0.05
+
+# Basic volcano plot
+plot(volcano_data$avg_log2FC, -log10(volcano_data$p_val_adj), 
+     col = ifelse(volcano_data$significant, "red", "black"), 
+     pch = 20, xlab = "Log2 Fold Change", ylab = "-Log10 p-value")
+```
+
+### CompleVolcano
+```{r}
+# Filter genes with adjusted p-value < 0.05
+significant_res_AF_annotated <- res_gene_AF_annotated[which(res_gene_AF_annotated$p_val_adj < 0.05), ]
+
+# Check how many significant genes you have
+nrow(significant_res_AF_annotated)
+
+# Visualize the distribution of log2FoldChange
+hist(significant_res_AF_annotated$avg_log2FC, breaks=40, main="Distribution of LFC (Control vs Activation)", xlab="Log2 Fold Change")
+
+#Volcano Plot
+png("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/volcano_AF.png", width = 2000, height = 1600, res = 300)
+
+EnhancedVolcano(
+  significant_res_AF_annotated,
+  lab =  significant_res_AF_annotated$X,  # Use gene names as labels
+  x = 'avg_log2FC',  # Log2 fold change column
+  y = 'p_val_adj',  # P-value column
+  labSize = 3.0,  # Label size
+  pCutoff = 1e-02,  # P-value cutoff for significance
+  title = 'Control vs AF',  # Plot title
+  legendPosition = 'right',  # Legend position
+  drawConnectors = TRUE,  # Connectors for labels
+  max.overlaps = 15  # Max number of overlapping labels
+)
+
+dev.off()
+```
+
+## ____________________CLUSTERS_____________________
+
+```{r}
+# For cluster 1 vs control
+res_cluster1_vs_control <- results(dds_gene_cluster, contrast = c("cluster", "1", "control"))
+
+# For cluster 2 vs control
+res_cluster2_vs_control <- results(dds_gene_cluster, contrast = c("cluster", "2", "control"))
+
+# For cluster 3 vs control
+res_cluster3_vs_control <- results(dds_gene_cluster, contrast = c("cluster", "3", "control"))
+
+```
+
+```{r}
+# Example for cluster 1 vs control
+hist(res_cluster1_vs_control$log2FoldChange, breaks=50, main="LFC (Cluster 1 vs Control)", xlab="Log2 Fold Change")
+DESeq2::plotMA(res_cluster1_vs_control, ylim = c(-20, 20))
+```
+
+```{r}
+# Example for cluster 1 vs control
+hist(res_cluster2_vs_control$log2FoldChange, breaks=50, main="LFC (Cluster 2 vs Control)", xlab="Log2 Fold Change")
+DESeq2::plotMA(res_cluster1_vs_control, ylim = c(-20, 20))
+```
+
+```{r}
+# Example for cluster 1 vs control
+hist(res_cluster3_vs_control$log2FoldChange, breaks=50, main="LFC (Cluster 3 vs Control)", xlab="Log2 Fold Change")
+DESeq2::plotMA(res_cluster1_vs_control, ylim = c(-20, 20))
+```
+
+```{r}
+library(AnnotationDbi)
+library(EnsDb.Hsapiens.v86)
+
+tx_ids <- rownames(dds_gene_cluster)
+
+tx2gene <- AnnotationDbi::select(EnsDb.Hsapiens.v86,
+                                 keys = tx_ids,
+                                 columns = c("GENENAME"),
+                                 keytype = "GENEID")
+
+# cluster 1
+res_cluster1_vs_control <- as.data.frame(res_cluster1_vs_control)
+res_cluster1_vs_control$GENEID <- tx_ids
+res_cluster1_annotated <- merge(res_cluster1_vs_control, tx2gene, by = "GENEID", all.x = TRUE)
+
+# cluster 2
+res_cluster2_vs_control <- as.data.frame(res_cluster2_vs_control)
+res_cluster2_vs_control$GENEID <- tx_ids
+res_cluster2_annotated <- merge(res_cluster2_vs_control, tx2gene, by = "GENEID", all.x = TRUE)
+
+# cluster 3
+res_cluster3_vs_control <- as.data.frame(res_cluster3_vs_control)
+res_cluster3_vs_control$GENEID <- tx_ids
+res_cluster3_annotated <- merge(res_cluster3_vs_control, tx2gene, by = "GENEID", all.x = TRUE)
+```
+
+```{r}
+# Export results
+write.csv(res_cluster1_annotated, file = "res_cluster1_vs_control_annotated.csv", row.names = FALSE)
+library(writexl)
+write_xlsx(res_cluster1_annotated, path = "C:/Users/Usuario/Documents/res_cluster1_vs_control_annotated.xlsx")
+
+write.csv(res_cluster2_annotated, file = "res_cluster2_vs_control_annotated.csv", row.names = FALSE)
+library(writexl)
+write_xlsx(res_cluster2_annotated, path = "C:/Users/Usuario/Documents/res_cluster2_vs_control_annotated.xlsx")
+
+write.csv(res_cluster3_annotated, file = "res_cluster3_vs_control_annotated.csv", row.names = FALSE)
+library(writexl)
+write_xlsx(res_cluster3_annotated, path = "C:/Users/Usuario/Documents/res_cluster3_vs_control_annotated.xlsx")
+
+```
+
+```{r}
+
+# For cluster 1
+sig_res1 <- res_cluster1_annotated[which(res_cluster1_annotated$padj < 0.05), ]
+
+png("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/volcano_cluster1.png", width = 2000, height = 1600, res = 300)
+EnhancedVolcano(
+  sig_res1,
+  lab = sig_res1$GENENAME,
+  x = 'log2FoldChange',
+  y = 'pvalue',
+  labSize = 3.0,
+  pCutoff = 1e-02,
+  title = 'Cluster 1 vs Control',
+  legendPosition = 'right',
+  drawConnectors = TRUE,
+  max.overlaps = 30
+)
+dev.off()
+
+# For cluster 2
+sig_res2 <- res_cluster2_annotated[which(res_cluster2_annotated$padj < 0.05), ]
+
+png("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/volcano_cluster2.png", width = 2000, height = 2600, res = 300)
+EnhancedVolcano(
+  sig_res2,
+  lab = sig_res2$GENENAME,
+  x = 'log2FoldChange',
+  y = 'pvalue',
+  labSize = 3.0,
+  pCutoff = 1e-02,
+  title = 'Cluster 2 vs Control',
+  legendPosition = 'right',
+  drawConnectors = TRUE,
+  max.overlaps = 30
+)
+dev.off()
+
+# For cluster 3
+sig_res3 <- res_cluster3_annotated[which(res_cluster3_annotated$padj < 0.05), ]
+
+png("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/volcano_cluster3.png", width = 2000, height = 3600, res = 300)
+EnhancedVolcano(
+  sig_res3,
+  lab = sig_res3$GENENAME,
+  x = 'log2FoldChange',
+  y = 'pvalue',
+  labSize = 3.0,
+  pCutoff = 1e-02,
+  title = 'Cluster 3 vs Control',
+  legendPosition = 'right',
+  drawConnectors = TRUE,
+  max.overlaps = 30
+)
+dev.off()
+```
+
+## HEATMAP cluster 1
+
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+
+up1 <- sig_res1[sig_res1$log2FoldChange > 1, ]
+down1 <- sig_res1[sig_res1$log2FoldChange < -1, ]
+
+up1_sorted <- up1[order(up1$baseMean), ]
+down1_sorted <- down1[order(down1$baseMean), ]
+
+# Calculate total number of rows (genes)
+n_up <- nrow(up1_sorted)
+n_down <- nrow(down1_sorted)
+
+# Find median positions
+median_posup <- ceiling(n_up / 2)
+median_posdown <- ceiling(n_down / 2)
+
+# Calculate Q1 position of the median
+q1_of_medianup <- ceiling((median_posup + 1) / 4)
+q1_of_mediandown <- ceiling((median_posdown + 1) / 4)
+
+# Filter out low baseMean genes
+up1_filtered <- up1_sorted[which(up1_sorted$baseMean >= q1_of_medianup), ]
+down1_filtered <- down1_sorted[which(down1_sorted$baseMean >= q1_of_mediandown), ]
+
+# Sort by log2FoldChange
+up1_top <- up1_filtered[order(up1_filtered$log2FoldChange, decreasing = TRUE), ]
+down1_top <- down1_filtered[order(down1_filtered$log2FoldChange, decreasing = FALSE), ]
+
+# Take top 30 from each
+top30_up1 <- head(up1_top, 30)
+top30_down1 <- head(down1_top, 30)
+
+# Combine into one data frame
+genes_top1 <- rbind(top30_up1, top30_down1)
+
+# Remove duplicates and set rownames
+genes_top1 <- genes_top1[!duplicated(genes_top1$GENEID), ]
+rownames(genes_top1) <- genes_top1$GENEID
+
+# Filter colData for cluster 1 and control only
+keep_samples <- rownames(colData(dds_gene_cluster))[colData(dds_gene_cluster)$cluster %in% c("1", "control")]
+filtered_colData <- colData(dds_gene_cluster)[keep_samples, ]
+
+# Get normalized VST counts
+vst_out <- vst(dds_gene_cluster, blind=FALSE)
+mat <- assay(vst_out)[rownames(genes_top1), keep_samples]
+
+# Scale (Z-score) the expression matrix
+mat.scaled <- t(apply(mat, 1, scale))
+colnames(mat.scaled) <- colnames(mat)
+
+# Select top/bottom genes for heatmap (optional: adjust num_keep)
+num_keep <- 25
+rows_keep <- c(seq(1, num_keep), seq((nrow(mat.scaled) - num_keep + 1), nrow(mat.scaled)))
+
+# Get log2FC and baseMean for heatmap annotations
+l2_val <- as.matrix(genes_top1[rows_keep, ]$log2FoldChange)
+colnames(l2_val) <- "logFC"
+
+mean <- as.matrix(genes_top1[rows_keep, ]$baseMean)
+colnames(mean) <- "AveExpr"
+
+# Color functions
+col_logFC <- colorRamp2(c(min(l2_val), 0, max(l2_val)), c("blue", "white", "red"))
+col_AveExpr <- colorRamp2(c(quantile(mean)[1], quantile(mean)[4]), c("white", "red"))
+
+# Define colors for conditions
+cond_colors <- c("control" = "pink", "1" = "#33a02c")
+
+# Create condition annotation
+cond_ha <- HeatmapAnnotation(
+  Condition = filtered_colData$cluster,
+  col = list(Condition = cond_colors),
+  show_annotation_name = TRUE
+)
+
+# Optional: summary annotation
+ha <- HeatmapAnnotation(summary = anno_summary(gp = gpar(fill = 2), height = unit(2, "cm")))
+
+# Heatmap 1: scaled expression
+h1 <- Heatmap(mat.scaled[rows_keep, ], cluster_rows = FALSE,  
+              show_column_names = FALSE, name = "Z-score",
+              cluster_columns = TRUE, 
+              top_annotation = cond_ha,
+              width = unit(10, "cm"))
+
+# Heatmap 2: logFC
+h2 <- Heatmap(l2_val, 
+              row_labels = genes_top1$GENENAME[rows_keep],
+              cluster_rows = FALSE, 
+              name = "logFC", 
+              top_annotation = ha, 
+              col = col_logFC,
+              cell_fun = function(j, i, x, y, w, h, col) {
+                grid.text(round(l2_val[i, j], 2), x, y)
+              },
+              width = unit(1.5, "cm"))
+
+# Heatmap 3: mean expression
+h3 <- Heatmap(mean, 
+              row_labels = genes_top1$GENENAME[rows_keep], 
+              cluster_rows = FALSE, 
+              name = "AveExpr", 
+              col = col_AveExpr,
+              cell_fun = function(j, i, x, y, w, h, col) {
+                grid.text(round(mean[i, j], 2), x, y)
+              },
+              width = unit(1.5, "cm"))
+
+# Combine heatmaps
+h <- h1 + h2 + h3
+
+# Save the heatmap to file
+png("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/HEATMAP_cluster1.png", res = 300, width = 6000, height = 7500)
+print(h)
+dev.off()
+```
+
+## HEATMAP cluster 2
+
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+
+up1 <- sig_res2[sig_res2$log2FoldChange > 1, ]
+down1 <- sig_res2[sig_res2$log2FoldChange < -1, ]
+
+up1_sorted <- up1[order(up1$baseMean), ]
+down1_sorted <- down1[order(down1$baseMean), ]
+
+# Calculate total number of rows (genes)
+n_up <- nrow(up1_sorted)
+n_down <- nrow(down1_sorted)
+
+# Find median positions
+median_posup <- ceiling(n_up / 2)
+median_posdown <- ceiling(n_down / 2)
+
+# Calculate Q1 position of the median
+q1_of_medianup <- ceiling((median_posup + 1) / 4)
+q1_of_mediandown <- ceiling((median_posdown + 1) / 4)
+
+# Filter out low baseMean genes
+up1_filtered <- up1_sorted[which(up1_sorted$baseMean >= q1_of_medianup), ]
+down1_filtered <- down1_sorted[which(down1_sorted$baseMean >= q1_of_mediandown), ]
+
+# Sort by log2FoldChange
+up1_top <- up1_filtered[order(up1_filtered$log2FoldChange, decreasing = TRUE), ]
+down1_top <- down1_filtered[order(down1_filtered$log2FoldChange, decreasing = FALSE), ]
+
+# Take top 30 from each
+top30_up1 <- head(up1_top, 30)
+top30_down1 <- head(down1_top, 30)
+
+# Combine into one data frame
+genes_top1 <- rbind(top30_up1, top30_down1)
+
+# Remove duplicates and set rownames
+genes_top1 <- genes_top1[!duplicated(genes_top1$GENEID), ]
+rownames(genes_top1) <- genes_top1$GENEID
+
+# Filter colData for cluster 1 and control only
+keep_samples <- rownames(colData(dds_gene_cluster))[colData(dds_gene_cluster)$cluster %in% c("1", "control")]
+filtered_colData <- colData(dds_gene_cluster)[keep_samples, ]
+
+# Get normalized VST counts
+vst_out <- vst(dds_gene_cluster, blind=FALSE)
+mat <- assay(vst_out)[rownames(genes_top1), keep_samples]
+
+# Scale (Z-score) the expression matrix
+mat.scaled <- t(apply(mat, 1, scale))
+colnames(mat.scaled) <- colnames(mat)
+
+# Select top/bottom genes for heatmap (optional: adjust num_keep)
+num_keep <- 25
+rows_keep <- c(seq(1, num_keep), seq((nrow(mat.scaled) - num_keep + 1), nrow(mat.scaled)))
+
+# Get log2FC and baseMean for heatmap annotations
+l2_val <- as.matrix(genes_top1[rows_keep, ]$log2FoldChange)
+colnames(l2_val) <- "logFC"
+
+mean <- as.matrix(genes_top1[rows_keep, ]$baseMean)
+colnames(mean) <- "AveExpr"
+
+# Color functions
+col_logFC <- colorRamp2(c(min(l2_val), 0, max(l2_val)), c("blue", "white", "red"))
+col_AveExpr <- colorRamp2(c(quantile(mean)[1], quantile(mean)[4]), c("white", "red"))
+
+# Define colors for conditions
+cond_colors <- c("control" = "pink", "1" = "#33a02c")
+
+# Create condition annotation
+cond_ha <- HeatmapAnnotation(
+  Condition = filtered_colData$cluster,
+  col = list(Condition = cond_colors),
+  show_annotation_name = TRUE
+)
+
+# Optional: summary annotation
+ha <- HeatmapAnnotation(summary = anno_summary(gp = gpar(fill = 2), height = unit(2, "cm")))
+
+# Heatmap 1: scaled expression
+h1 <- Heatmap(mat.scaled[rows_keep, ], cluster_rows = FALSE,  
+              show_column_names = FALSE, name = "Z-score",
+              cluster_columns = TRUE, 
+              top_annotation = cond_ha,
+              width = unit(10, "cm"))
+
+# Heatmap 2: logFC
+h2 <- Heatmap(l2_val, 
+              row_labels = genes_top1$GENENAME[rows_keep],
+              cluster_rows = FALSE, 
+              name = "logFC", 
+              top_annotation = ha, 
+              col = col_logFC,
+              cell_fun = function(j, i, x, y, w, h, col) {
+                grid.text(round(l2_val[i, j], 2), x, y)
+              },
+              width = unit(1.5, "cm"))
+
+# Heatmap 3: mean expression
+h3 <- Heatmap(mean, 
+              row_labels = genes_top1$GENENAME[rows_keep], 
+              cluster_rows = FALSE, 
+              name = "AveExpr", 
+              col = col_AveExpr,
+              cell_fun = function(j, i, x, y, w, h, col) {
+                grid.text(round(mean[i, j], 2), x, y)
+              },
+              width = unit(1.5, "cm"))
+
+# Combine heatmaps
+h <- h1 + h2 + h3
+
+# Save the heatmap to file
+png("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/HEATMAP_cluster2.png", res = 300, width = 6000, height = 7500)
+print(h)
+dev.off()
+```
+
+## HEATMAP cluster 3
+
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+
+up1 <- sig_res3[sig_res3$log2FoldChange > 1, ]
+down1 <- sig_res3[sig_res3$log2FoldChange < -1, ]
+
+up1_sorted <- up1[order(up1$baseMean), ]
+down1_sorted <- down1[order(down1$baseMean), ]
+
+# Calculate total number of rows (genes)
+n_up <- nrow(up1_sorted)
+n_down <- nrow(down1_sorted)
+
+# Find median positions
+median_posup <- ceiling(n_up / 2)
+median_posdown <- ceiling(n_down / 2)
+
+# Calculate Q1 position of the median
+q1_of_medianup <- ceiling((median_posup + 1) / 4)
+q1_of_mediandown <- ceiling((median_posdown + 1) / 4)
+
+# Filter out low baseMean genes
+up1_filtered <- up1_sorted[which(up1_sorted$baseMean >= q1_of_medianup), ]
+down1_filtered <- down1_sorted[which(down1_sorted$baseMean >= q1_of_mediandown), ]
+
+# Sort by log2FoldChange
+up1_top <- up1_filtered[order(up1_filtered$log2FoldChange, decreasing = TRUE), ]
+down1_top <- down1_filtered[order(down1_filtered$log2FoldChange, decreasing = FALSE), ]
+
+# Take top 30 from each
+top30_up1 <- head(up1_top, 30)
+top30_down1 <- head(down1_top, 30)
+
+# Combine into one data frame
+genes_top1 <- rbind(top30_up1, top30_down1)
+
+# Remove duplicates and set rownames
+genes_top1 <- genes_top1[!duplicated(genes_top1$GENEID), ]
+rownames(genes_top1) <- genes_top1$GENEID
+
+# Filter colData for cluster 1 and control only
+keep_samples <- rownames(colData(dds_gene_cluster))[colData(dds_gene_cluster)$cluster %in% c("1", "control")]
+filtered_colData <- colData(dds_gene_cluster)[keep_samples, ]
+
+# Get normalized VST counts
+vst_out <- vst(dds_gene_cluster, blind=FALSE)
+mat <- assay(vst_out)[rownames(genes_top1), keep_samples]
+
+# Scale (Z-score) the expression matrix
+mat.scaled <- t(apply(mat, 1, scale))
+colnames(mat.scaled) <- colnames(mat)
+
+# Select top/bottom genes for heatmap (optional: adjust num_keep)
+num_keep <- 25
+rows_keep <- c(seq(1, num_keep), seq((nrow(mat.scaled) - num_keep + 1), nrow(mat.scaled)))
+
+# Get log2FC and baseMean for heatmap annotations
+l2_val <- as.matrix(genes_top1[rows_keep, ]$log2FoldChange)
+colnames(l2_val) <- "logFC"
+
+mean <- as.matrix(genes_top1[rows_keep, ]$baseMean)
+colnames(mean) <- "AveExpr"
+
+# Color functions
+col_logFC <- colorRamp2(c(min(l2_val), 0, max(l2_val)), c("blue", "white", "red"))
+col_AveExpr <- colorRamp2(c(quantile(mean)[1], quantile(mean)[4]), c("white", "red"))
+
+# Define colors for conditions
+cond_colors <- c("control" = "pink", "1" = "#33a02c")
+
+# Create condition annotation
+cond_ha <- HeatmapAnnotation(
+  Condition = filtered_colData$cluster,
+  col = list(Condition = cond_colors),
+  show_annotation_name = TRUE
+)
+
+# Optional: summary annotation
+ha <- HeatmapAnnotation(summary = anno_summary(gp = gpar(fill = 2), height = unit(2, "cm")))
+
+# Heatmap 1: scaled expression
+h1 <- Heatmap(mat.scaled[rows_keep, ], cluster_rows = FALSE,  
+              show_column_names = FALSE, name = "Z-score",
+              cluster_columns = TRUE, 
+              top_annotation = cond_ha,
+              width = unit(10, "cm"))
+
+# Heatmap 2: logFC
+h2 <- Heatmap(l2_val, 
+              row_labels = genes_top1$GENENAME[rows_keep],
+              cluster_rows = FALSE, 
+              name = "logFC", 
+              top_annotation = ha, 
+              col = col_logFC,
+              cell_fun = function(j, i, x, y, w, h, col) {
+                grid.text(round(l2_val[i, j], 2), x, y)
+              },
+              width = unit(1.5, "cm"))
+
+# Heatmap 3: mean expression
+h3 <- Heatmap(mean, 
+              row_labels = genes_top1$GENENAME[rows_keep], 
+              cluster_rows = FALSE, 
+              name = "AveExpr", 
+              col = col_AveExpr,
+              cell_fun = function(j, i, x, y, w, h, col) {
+                grid.text(round(mean[i, j], 2), x, y)
+              },
+              width = unit(1.5, "cm"))
+
+# Combine heatmaps
+h <- h1 + h2 + h3
+
+# Save the heatmap to file
+png("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/HEATMAP_cluster3.png", res = 300, width = 6000, height = 7500)
+print(h)
+dev.off()
+```

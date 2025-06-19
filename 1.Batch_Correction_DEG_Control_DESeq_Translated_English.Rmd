@@ -1,0 +1,1428 @@
+vers---
+title: "1.Batch_Correction_DEG_DESeq2"
+author: "Daniel Bernad Ibáñez"
+date: "2025-06-13"
+output: html_document
+---
+
+# ============================================================================
+#                     COMPLETE RNA-SEQ ANALYSIS
+# ============================================================================
+
+```{r, include=FALSE, echo=FALSE, results='hide'}
+# Function to install and load packages
+install_and_load <- function(packages) {
+  # Detect Bioconductor packages
+  bioc_packages <- c("DESeq2", "sva", "edgeR", "limma", "ConsensusClusterPlus", "tximport", "biomaRt", "org.Hs.eg.db", "EnsDb.Hsapiens.v86")
+  
+  for (pkg in packages) {
+    if (!require(pkg, character.only = TRUE)) {
+      if (pkg %in% bioc_packages) {
+        # Install BiocManager if not available
+        if (!requireNamespace("BiocManager", quietly = TRUE)) {
+          install.packages("BiocManager")
+        }
+        BiocManager::install(pkg, update = FALSE, ask = FALSE)
+      } else {
+        install.packages(pkg, dependencies = TRUE)
+      }
+      library(pkg, character.only = TRUE)
+    }
+  }
+}
+
+```
+
+```{r, include=FALSE, echo=FALSE, results='hide'}
+# List of required packages
+required_packages <- c(
+  "DESeq2", "sva", "edgeR", "limma", 
+  "ggplot2", "dplyr", "pheatmap", "RColorBrewer",
+  "cluster", "factoextra", "corrplot", "gridExtra", "ConsensusClusterPlus", "tximport", "biomaRt", "org.Hs.eg.db", "EnsDb.Hsapiens.v86",  "openxlsx"
+)
+
+# Install and load packages
+cat("Installing and loading libraries...\n")
+install_and_load(required_packages)
+```
+
+# ============================================================================
+# 1. LOAD AND PREPARE DATA
+# ============================================================================
+
+```{r}
+cat("\n=== LOADING DATA ===\n")
+```
+
+## If you already have data
+```{r}
+# Cargar metadatos (asegurar rownames)
+colData <- read.csv("C:/Users/Usuario/Desktop/colData_export.csv", row.names = 1)
+
+# Cargar datos de conteo
+txi_gene_filtered <- readRDS("C:/Users/Usuario/Desktop/txi_gene_filtered_export.rds")
+```
+
+## If you have downloaded fASTQ files and processed them with salmon
+```{r}
+# Load sample data, sample data was processed with a fastp/salmon pipeline
+samples <- list.files("H:/preprocessing_output_2/salmon_output", pattern="(_1_salmon$|_salmon$)", full.names=TRUE)
+files <- file.path(samples, "quant.sf")
+
+# Filter both, maintaining aligned indices
+keep <- file.exists(files)
+samples <- samples[keep]
+files <- files[keep]
+
+# Assign names correctly
+names(files) <- basename(samples)
+
+# Continue with tximport
+txi <- tximport(files, type = "salmon", txOut = TRUE)
+```
+
+```{r}
+# Read the CSV file, using column 18 as row names
+colData <- read.csv("C:/Users/cst325/Desktop/BACHELORS/Rdata/Data/Samples/endothelium_rna.csv", row.names = 18)
+
+# Add 'control' variable
+colData$control <- ifelse(colData$Cond == "Control", "si", "no")
+colData$control <- factor(colData$control, levels = c("si", "no"))
+
+cat("Dimensions of colData:", dim(colData), "\n")
+cat("Número de controles:", sum(colData$control == "si"), "\n")
+cat("Número de tratamientos:", sum(colData$control == "no"), "\n")
+
+# Check the first few rows of colData to confirm it's correct
+head(colData)
+```
+
+```{r}
+# Remove the "_1_salmon" or "_salmon" part from the txi column names
+colnames(txi$counts) <- gsub("_1_salmon|_salmon", "", colnames(txi$counts))
+colnames(txi$abundance) <- gsub("_1_salmon|_salmon", "", colnames(txi$abundance))
+colnames(txi$length) <- gsub("_1_salmon|_salmon", "", colnames(txi$length))
+```
+
+```{r}
+# Find common sample names
+common_samples <- intersect(rownames(colData), colnames(txi$counts))
+
+# Filter both objects to keep only the common samples
+colData <- colData[common_samples, , drop = FALSE]
+txi$counts <- txi$counts[, common_samples]
+txi$abundance <- txi$abundance[, common_samples]
+txi$length <- txi$length[, common_samples]
+
+all(rownames(colData) == colnames(txi$counts))  # Confirm samples are aligned
+```
+
+```{r}
+# Clean the transcript IDs by removing version numbers
+transcript_ids_clean <- sub("\\..*", "", rownames(txi$counts))
+
+# Map transcript IDs to gene IDs and gene names
+tx2gene <- select(EnsDb.Hsapiens.v86, 
+                  keys = transcript_ids_clean, 
+                  columns = c("GENEID", "GENENAME", "GENEBIOTYPE", "SEQNAME"), 
+                  keytype = "TXID")
+
+# Summarize counts at the gene level
+txi_gene <- summarizeToGene(txi, tx2gene, ignoreTxVersion = TRUE, ignoreAfterBar = TRUE)
+
+# The `txi_gene$counts` will have counts summed by gene
+```
+
+```{r}
+# Filter to keep only protein-coding genes and primary chromosomes
+primary_chrs <- c(as.character(1:22), "X", "Y", "MT")
+keep_genes <- tx2gene$GENEID[
+  tx2gene$GENEBIOTYPE == "protein_coding" & 
+  tx2gene$SEQNAME %in% primary_chrs
+]
+
+# Check how many genes in the summarized counts match the filtered list
+sum(rownames(txi_gene$counts) %in% keep_genes)  # Should be a reasonable number
+
+txi_gene_filtered <- txi_gene$counts[rownames(txi_gene$counts) %in% keep_genes, ]
+
+# Create a new txi object with filtered counts, abundance, and lengths
+txi_gene_filtered <- list(
+  counts = txi_gene$counts[rownames(txi_gene$counts) %in% rownames(txi_gene_filtered), ],
+  abundance = txi_gene$abundance[rownames(txi_gene$abundance) %in% rownames(txi_gene_filtered), ],
+  length = txi_gene$length[rownames(txi_gene$length) %in% rownames(txi_gene_filtered), ],
+  countsFromAbundance = "no")  # Since these are raw counts, not scaled TPM or length-scaled TPM
+```
+
+
+# ============================================================================
+# 2. PREPARAR DATOS PARA ANÁLISIS
+# ============================================================================
+
+```{r}
+# Preparar matriz de conteos para análisis
+count_matrix <- txi_gene_filtered$counts
+
+# Asegurar que las muestras coincidan
+common_samples <- intersect(colnames(count_matrix), rownames(colData))
+count_matrix <- count_matrix[, common_samples]
+colData <- colData[common_samples, ]
+```
+
+```{r}
+txi_gene_filtered <- list(
+  counts = count_matrix,
+  abundance = txi_gene_filtered$abundance,
+  length = txi_gene_filtered$length,
+  countsFromAbundance = "no"  # Añadir este elemento
+)
+
+# Filter colData for specific criteria
+colData <- colData[
+  colData$Line == "HUVEC" &
+  colData$lib_str == "RNA-Seq" &
+  colData$lib_sel == "cDNA",
+]
+
+filtered_gsms <- colData$GSM
+
+mapping <- read.csv("C:/Users/Usuario/Desktop/srr_data_output.csv")
+filtered_srrs <- mapping$RUN[mapping$GSM %in% filtered_gsms]
+
+txi_gene_filtered$counts <- txi_gene_filtered$counts[, filtered_srrs]
+txi_gene_filtered$abundance <- txi_gene_filtered$abundance[, filtered_srrs]
+txi_gene_filtered$length <- txi_gene_filtered$length[, filtered_srrs]
+
+# Crear objeto DESeq2 temporal para transformaciones
+dds_temp <- DESeqDataSetFromTximport(
+  txi = txi_gene_filtered,
+  colData = colData,
+  design = ~ control
+)
+# Subset the DESeq2 object
+dds_temp <- dds_temp[, rownames(colData)]
+```
+```{r}
+saveRDS(txi_gene_filtered, file = "txi_gene_filtered_filtered.rds")
+```
+
+```{r}
+# Filtro básico para genes con muy pocos conteos
+keep_genes <- rowSums(counts(dds_temp) >= 10) >= 3
+dds_temp <- dds_temp[keep_genes, ]
+```
+
+# ============================================================================
+# 3. SAMPLE DISTANCE HEATMAP ANTES DE CORRECCIÓN BATCH
+# ============================================================================
+
+```{r}
+cat("\n=== SAMPLE DISTANCE HEATMAP - ANTES DE CORRECCIÓN BATCH ===\n")
+```
+
+```{r}
+# Función corregida para crear sample distance heatmap
+create_sample_distance_heatmap <- function(dds_object, colData, title_suffix = "", filename_suffix = "") {
+  # Transformación estabilizadora de varianza
+  vst_data <- vst(dds_object, blind = TRUE)
+  vst_matrix <- assay(vst_data)
+  
+  # Calcular distancias entre muestras
+  sample_dists <- dist(t(vst_matrix))
+  sample_dist_matrix <- as.matrix(sample_dists)
+  
+  # Asegurar nombres consistentes
+  sample_names <- colnames(vst_matrix)
+  rownames(sample_dist_matrix) <- sample_names
+  colnames(sample_dist_matrix) <- sample_names
+  
+  # Seleccionar variables específicas requeridas
+  # Variables específicas que quieres mostrar
+  desired_vars <- c("GSE", "Cond", "control", "trt1")
+  
+  # Verificar cuáles de estas variables existen en colData
+  available_vars <- names(colData)
+  selected_vars <- desired_vars[desired_vars %in% available_vars]
+  
+  cat("Variables disponibles:", paste(available_vars, collapse = ", "), "\n")
+  cat("Variables seleccionadas para anotación:", paste(selected_vars, collapse = ", "), "\n")
+  
+  # Crear annotation_col con variables específicas
+  if (length(selected_vars) > 0) {
+    # Filtrar solo variables que tienen más de un nivel
+    valid_selected_vars <- c()
+    for (var in selected_vars) {
+      unique_vals <- unique(colData[[var]])
+      if (length(unique_vals) > 1 && length(unique_vals) <= 30) {  # Límite aumentado para GSE
+        valid_selected_vars <- c(valid_selected_vars, var)
+        cat(sprintf("Variable %s: %d niveles únicos\n", var, length(unique_vals)))
+      }
+    }
+    
+    if (length(valid_selected_vars) > 0) {
+      annotation_col <- colData[sample_names, valid_selected_vars, drop = FALSE]
+      
+      # Asegurar que annotation_col es un data.frame con rownames correctos
+      annotation_col <- as.data.frame(annotation_col)
+      rownames(annotation_col) <- sample_names
+      
+      # Convertir caracteres a factores si es necesario
+      for (var in valid_selected_vars) {
+        if (is.character(annotation_col[[var]])) {
+          annotation_col[[var]] <- as.factor(annotation_col[[var]])
+        }
+      }
+    } else {
+      annotation_col <- NA
+    }
+  } else {
+    annotation_col <- NA
+  }
+  
+  # Colores para el heatmap
+  colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+  
+  # Crear heatmap SIN etiquetas de fila
+  tryCatch({
+    if (!identical(annotation_col, NA)) {
+      # Con anotaciones pero SIN etiquetas de fila
+      pheatmap(
+        sample_dist_matrix,
+        clustering_distance_rows = sample_dists,
+        clustering_distance_cols = sample_dists,
+        col = colors,
+        annotation_col = annotation_col,
+        show_rownames = FALSE,  # OCULTAR ETIQUETAS DE FILA
+        show_colnames = FALSE,  # OCULTAR ETIQUETAS DE COLUMNA
+        main = paste("Sample Distance Heatmap", title_suffix),
+        filename = if(filename_suffix != "") paste0("sample_distance_heatmap", filename_suffix, ".pdf") else NULL,
+        width = 10,
+        height = 8
+      )
+    } else {
+      # Sin anotaciones y sin etiquetas
+      pheatmap(
+        sample_dist_matrix,
+        clustering_distance_rows = sample_dists,
+        clustering_distance_cols = sample_dists,
+        col = colors,
+        show_rownames = FALSE,  # OCULTAR ETIQUETAS DE FILA
+        show_colnames = FALSE,  # OCULTAR ETIQUETAS DE COLUMNA
+        main = paste("Sample Distance Heatmap", title_suffix),
+        filename = if(filename_suffix != "") paste0("sample_distance_heatmap", filename_suffix, ".pdf") else NULL,
+        width = 10,
+        height = 8
+      )
+    }
+    
+    cat("Heatmap generado exitosamente\n")
+    if(filename_suffix != "") {
+      cat("Archivo guardado como:", paste0("sample_distance_heatmap", filename_suffix, ".pdf"), "\n")
+    }
+    
+  }, error = function(e) {
+    cat("Error al generar heatmap con anotaciones:", e$message, "\n")
+    cat("Generando heatmap sin anotaciones...\n")
+    
+    # Heatmap de respaldo sin anotaciones ni etiquetas
+    pheatmap(
+      sample_dist_matrix,
+      clustering_distance_rows = sample_dists,
+      clustering_distance_cols = sample_dists,
+      col = colors,
+      show_rownames = FALSE,  # OCULTAR ETIQUETAS DE FILA
+      show_colnames = FALSE,  # OCULTAR ETIQUETAS DE COLUMNA
+      main = paste("Sample Distance Heatmap", title_suffix, "(Sin Anotaciones)"),
+      filename = if(filename_suffix != "") paste0("sample_distance_heatmap", filename_suffix, "_backup.pdf") else NULL,
+      width = 10,
+      height = 8
+    )
+  })
+  
+  return(list(distances = sample_dists, matrix = sample_dist_matrix))
+}
+```
+
+```{r}
+# Crear heatmap ANTES de corrección batch
+pre_correction_results <- create_sample_distance_heatmap(
+  dds_temp, colData, 
+  "- Antes de Corrección Batch", "_antes_correccion"
+)
+```
+
+# ============================================================================
+# 4. ANÁLISIS DE BATCH EFFECTS - VERSIÓN MULTIDIMENSIONAL
+# ============================================================================
+```{r}
+cat("\n=== ANÁLISIS DE BATCH EFFECTS MULTIDIMENSIONAL ===\n")
+```
+
+```{r}
+# Normalización para PCA (usar VST de DESeq2)
+vst_data <- vst(dds_temp, blind = TRUE)
+vst_matrix <- assay(vst_data)
+```
+
+```{r}
+# Función corregida para calcular métricas de separación MULTIDIMENSIONAL
+calculate_separation_metric_multidim <- function(pca_result, grouping_var, target_variance = 0.85) {
+  
+  # Calcular varianza explicada por cada componente
+  var_explained <- pca_result$sdev^2 / sum(pca_result$sdev^2)
+  cum_var <- cumsum(var_explained)
+  
+  # Determinar número de componentes para alcanzar el target de varianza
+  n_components <- which(cum_var >= target_variance)[1]
+  
+  # Asegurar un mínimo de 3 componentes y máximo de 20
+  n_components <- max(3, min(n_components, 20, ncol(pca_result$x)))
+  
+  cat(sprintf("Usando %d componentes principales (%.1f%% varianza explicada)\n", 
+              n_components, cum_var[n_components] * 100))
+  
+  # Usar múltiples dimensiones para el cálculo
+  pca_coords_multi <- pca_result$x[, 1:n_components, drop = FALSE]
+  
+  # Verificación inicial de datos válidos
+  if (length(unique(grouping_var)) < 2) {
+    return(list(silhouette_avg = NA, separation_score = NA, n_components = n_components, variance_explained = cum_var[n_components]))
+  }
+  
+  # Remover valores faltantes y mantener consistencia de índices
+  valid_indices <- !is.na(grouping_var) & complete.cases(pca_coords_multi)
+  
+  if (sum(valid_indices) < 3) {  # Necesitamos al menos 3 puntos para silhouette
+    return(list(silhouette_avg = NA, separation_score = NA, n_components = n_components, variance_explained = cum_var[n_components]))
+  }
+  
+  # Filtrar datos válidos
+  pca_coords_clean <- pca_coords_multi[valid_indices, , drop = FALSE]
+  grouping_var_clean <- grouping_var[valid_indices]
+  
+  # Verificar que después de la limpieza aún tenemos múltiples grupos
+  unique_groups <- unique(grouping_var_clean)
+  if (length(unique_groups) < 2) {
+    return(list(silhouette_avg = NA, separation_score = NA, n_components = n_components, variance_explained = cum_var[n_components]))
+  }
+  
+  # Calcular matriz de distancias en espacio multidimensional
+  tryCatch({
+    dist_matrix <- dist(pca_coords_clean)
+    
+    # Convertir grupos a factor y luego a numérico de manera segura
+    groups_factor <- as.factor(grouping_var_clean)
+    groups_numeric <- as.numeric(groups_factor)
+    
+    # Verificar que todos los grupos tienen al menos un miembro
+    group_counts <- table(groups_numeric)
+    if (any(group_counts == 0) || length(group_counts) < 2) {
+      return(list(silhouette_avg = NA, separation_score = NA, n_components = n_components, variance_explained = cum_var[n_components]))
+    }
+    
+    # Calcular silhouette score de manera segura en espacio multidimensional
+    sil_result <- silhouette(groups_numeric, dist_matrix)
+    
+    # Verificar que sil_result es una matriz válida
+    if (is.matrix(sil_result) && ncol(sil_result) >= 3) {
+      sil_avg <- mean(sil_result[, 3], na.rm = TRUE)
+    } else {
+      sil_avg <- NA
+    }
+    
+    # Calcular separación entre grupos en espacio multidimensional
+    if (length(unique_groups) > 1) {
+      between_ss <- sum(sapply(unique_groups, function(g) {
+        group_points <- pca_coords_clean[grouping_var_clean == g, , drop = FALSE]
+        if (nrow(group_points) > 0) {
+          group_center <- colMeans(group_points)
+          overall_center <- colMeans(pca_coords_clean)
+          sum(grouping_var_clean == g) * sum((group_center - overall_center)^2)
+        } else {
+          0
+        }
+      }))
+      
+      within_ss <- sum(sapply(unique_groups, function(g) {
+        group_points <- pca_coords_clean[grouping_var_clean == g, , drop = FALSE]
+        if (nrow(group_points) > 1) {
+          group_center <- colMeans(group_points)
+          sum(apply(group_points, 1, function(x) sum((x - group_center)^2)))
+        } else {
+          0
+        }
+      }))
+      
+      separation_score <- between_ss / (within_ss + 1e-10)
+    } else {
+      separation_score <- 0
+    }
+    
+    return(list(
+      silhouette_avg = sil_avg, 
+      separation_score = separation_score,
+      n_components = n_components,
+      variance_explained = cum_var[n_components]
+    ))
+    
+  }, error = function(e) {
+    cat("Error en calculate_separation_metric_multidim para variable:", deparse(substitute(grouping_var)), "\n")
+    cat("Error específico:", e$message, "\n")
+    return(list(silhouette_avg = NA, separation_score = NA, n_components = n_components, variance_explained = cum_var[n_components]))
+  })
+}
+```
+
+```{r}
+# Realizar PCA EXTENDIDO
+pca_result <- prcomp(t(vst_matrix), scale. = FALSE)
+```
+
+```{r}
+# Mostrar información de varianza explicada
+var_explained <- pca_result$sdev^2 / sum(pca_result$sdev^2)
+cum_var_explained <- cumsum(var_explained)
+
+cat("Varianza explicada por los primeros 15 componentes:\n")
+for (i in 1:min(15, length(var_explained))) {
+  cat(sprintf("PC%d: %.2f%% (Acumulada: %.2f%%)\n", 
+              i, var_explained[i] * 100, cum_var_explained[i] * 100))
+}
+```
+
+```{r}
+# Crear data frame para visualización (usando solo PC1 y PC2 para plots)
+pca_data <- data.frame(
+  PC1 = pca_result$x[, 1],
+  PC2 = pca_result$x[, 2],
+  colData
+)
+
+# Verificar datos antes del análisis
+cat("\nVerificando estructura de datos:\n")
+cat("Dimensiones de matriz PCA:", dim(pca_result$x), "\n")
+cat("Longitud de colData:", nrow(colData), "\n")
+
+# Verificar variables categóricas
+categorical_vars <- names(colData)[sapply(colData, function(x) is.factor(x) || is.character(x))]
+
+for (var in categorical_vars) {
+  unique_vals <- unique(colData[[var]])
+  cat(sprintf("Variable %s: %d niveles únicos\n", var, length(unique_vals)))
+  
+  # Verificar valores faltantes
+  na_count <- sum(is.na(colData[[var]]))
+  if (na_count > 0) {
+    cat(sprintf("  - Advertencia: %d valores faltantes en %s\n", na_count, var))
+  }
+}
+```
+
+```{r}
+# Análisis de separación MULTIDIMENSIONAL
+cat("\n=== MÉTRICAS DE AGRUPACIÓN MULTIDIMENSIONAL ===\n")
+separation_results <- list()
+
+for (var in categorical_vars) {
+  if (length(unique(colData[[var]])) > 1) {
+    cat(sprintf("\nProcesando variable: %s\n", var))
+    
+    metrics <- calculate_separation_metric_multidim(pca_result, colData[[var]])
+    separation_results[[var]] <- metrics
+    
+    if (!is.na(metrics$silhouette_avg)) {
+      cat(sprintf("%s - Silhouette: %.3f, Separación: %.3f (%d PCs, %.1f%% var)\n", 
+                  var, metrics$silhouette_avg, metrics$separation_score,
+                  metrics$n_components, metrics$variance_explained * 100))
+    } else {
+      cat(sprintf("%s - No se pudieron calcular métricas (datos insuficientes)\n", var))
+    }
+  }
+}
+```
+
+# ============================================================================
+# 5. ANÁLISIS SVA PARA BATCH EFFECTS OCULTOS
+# ============================================================================
+```{r}
+cat("\n--- Análisis SVA para batch effects ocultos ---\n")
+```
+
+```{r}
+# Preparar matrices para SVA
+mod1 <- model.matrix(~ control, data = colData)
+mod0 <- model.matrix(~ 1, data = colData)
+
+# Calcular size factors primero
+dds_temp <- estimateSizeFactors(dds_temp)
+
+# Usar datos normalizados para SVA
+normalized_counts <- counts(dds_temp, normalized = TRUE)
+# Filtrar genes con expresión muy baja
+idx <- rowMeans(normalized_counts) > 1
+dat_filtered <- normalized_counts[idx, ]
+```
+
+```{r}
+# Estimar número de variables sustituto
+n.sv <- num.sv(dat_filtered, mod1, method = "be")
+cat("Número estimado de variables sustituto:", n.sv, "\n")
+
+# Calcular variables sustituto si n.sv > 0
+if (n.sv > 0) {
+  svobj <- sva(dat_filtered, mod1, mod0, n.sv = n.sv)
+  cat("Variables sustituto calculadas exitosamente\n")
+  
+  # Añadir variables sustituto a colData
+  for (i in 1:n.sv) {
+    colData[[paste0("SV", i)]] <- svobj$sv[, i]
+  }
+} else {
+  cat("No se detectaron variables sustituto significativas\n")
+  svobj <- NULL
+}
+```
+
+# ============================================================================
+# 7. CREAR OBJETO DESEQ2 CORREGIDO Y HEATMAP POST-CORRECCIÓN
+# ============================================================================
+```{r}
+cat("\n=== SAMPLE DISTANCE HEATMAP - DESPUÉS DE CORRECCIÓN BATCH ===\n")
+```
+
+```{r}
+# Usar los conteos originales de tximport
+raw_counts <- txi_gene_filtered$counts
+
+# Identificar genes y muestras comunes ANTES de crear el objeto txi
+common_genes <- intersect(
+  rownames(raw_counts),
+  rownames(txi_gene_filtered$abundance)
+)
+
+common_samples <- intersect(
+  colnames(raw_counts),
+  colnames(txi_gene_filtered$abundance)
+)
+
+cat("Genes comunes:", length(common_genes), "\n")
+cat("Muestras comunes:", length(common_samples), "\n")
+```
+
+```{r}
+# Manejo de overflow de enteros
+cat("\n=== CORRECCIÓN DE OVERFLOW DE ENTEROS ===\n")
+
+# Asegurar dimensiones consistentes
+counts_clean <- round(raw_counts[common_genes, common_samples])
+counts_clean[is.na(counts_clean)] <- 0
+
+# Diagnóstico del problema de overflow
+max_val <- max(counts_clean, na.rm = TRUE)
+cat("Valor máximo encontrado:", max_val, "\n")
+cat("Límite de enteros R:", .Machine$integer.max, "\n")
+
+# Aplicar escalado si es necesario
+if (max_val > .Machine$integer.max) {
+  scale_factor <- .Machine$integer.max / (max_val * 1.1)  # Factor de seguridad del 10%
+  corrected_counts_final <- round(counts_clean * scale_factor)
+  cat("Matriz escalada con factor:", scale_factor, "\n")
+} else {
+  corrected_counts_final <- round(counts_clean)
+  cat("Solo se aplicó redondeo (sin escalado necesario)\n")
+}
+
+```
+
+```{r}
+# Asegurar dimensiones consistentes para todas las matrices
+abundance_clean <- txi_gene_filtered$abundance[common_genes, common_samples]
+length_clean <- txi_gene_filtered$length[common_genes, common_samples]
+
+
+# Verificar que todas las matrices tengan las mismas dimensiones
+stopifnot(
+  all.equal(dim(corrected_counts_final), dim(abundance_clean)),
+  all.equal(dim(corrected_counts_final), dim(length_clean)),
+  all(rownames(corrected_counts_final) == rownames(abundance_clean)),
+  all(colnames(corrected_counts_final) == colnames(abundance_clean))
+)
+```
+
+```{r}
+# rear objeto txi con elemento countsFromAbundance
+txi_corrected <- list(
+  counts = corrected_counts_final,
+  abundance = abundance_clean,
+  length = length_clean,
+  countsFromAbundance = "no"  # Elemento crítico
+)
+
+# Asegurar que colData coincida con las muestras
+colData_corrected <- colData[common_samples, ]
+
+# Verificar consistencia final
+stopifnot(
+  all(colnames(txi_corrected$counts) == rownames(colData_corrected))
+)
+```
+
+```{r}
+# Crear diseño incluyendo batch effect explicito y variables sustituto de SVA
+design_formula <- "~ SV1 + SV2 + GSE + control"
+
+cat("Fórmula de diseño:", design_formula, "\n")
+
+# Crear objeto DESeq2 con manejo de errores
+tryCatch({
+  dds_corrected <- DESeqDataSetFromTximport(
+    txi = txi_corrected,
+    colData = colData_corrected,
+    design = as.formula(design_formula)
+  )
+  
+    # Normalización robusta contra ceros
+  dds_corrected <- estimateSizeFactors(dds_corrected, type = "poscounts")
+  
+  cat("¡Objeto DESeq2 creado exitosamente!\n")
+  cat("Dimensiones finales:", dim(dds_corrected), "\n")
+  
+}, error = function(e) {
+  cat("Error al crear DESeqDataSet:", e$message, "\n")
+  cat("Intentando con DESeqDataSetFromMatrix como alternativa...\n")
+  
+  # Alternativa usando DESeqDataSetFromMatrix
+  dds_corrected <<- DESeqDataSetFromMatrix(
+    countData = corrected_counts_final,
+    colData = colData_corrected,
+    design = as.formula(design_formula)
+  )
+  
+  # Normalización robusta contra ceros también en este caso
+  dds_corrected <<- estimateSizeFactors(dds_corrected, type = "poscounts")
+  
+  cat("Objeto DESeq2 creado con método alternativo\n")
+})
+
+keep_genes <- rowSums(counts(dds_corrected) > 0) >= 3
+dds_corrected <- dds_corrected[keep_genes, ]
+
+# Crear heatmap con colData correcto
+post_correction_results <- create_sample_distance_heatmap(
+  dds_corrected, colData_corrected,  # Usar colData_corrected en lugar de colData
+  "- Después de Corrección Batch", "_despues_correccion"
+)
+```
+
+# ============================================================================
+# 8. VALIDACIÓN POST-CORRECCIÓN CON ANÁLISIS MULTIDIMENSIONAL
+# ============================================================================
+```{r}
+cat("\n=== VALIDACIÓN MULTIDIMENSIONAL POST-CORRECCIÓN ===\n")
+```
+
+```{r}
+# Crear datos VST post-corrección para análisis
+vst_data_corrected <- vst(dds_corrected, blind = TRUE)
+vst_matrix_corrected <- assay(vst_data_corrected)
+pca_result_corrected <- prcomp(t(vst_matrix_corrected), scale. = FALSE)
+
+# Comparar métricas antes/después para variables clave usando análisis multidimensional
+variables_to_validate <- c("control", "Cond", "GSE")
+```
+
+```{r}
+cat("Comparación ANTES vs DESPUÉS de corrección batch:\n")
+
+for (var in variables_to_validate) {
+  if (var %in% names(separation_results)) {
+    # Métricas pre-corrección (ya calculadas)
+    pre_metrics <- separation_results[[var]]
+    
+    # Métricas post-corrección usando análisis multidimensional
+    post_metrics <- calculate_separation_metric_multidim(
+      pca_result_corrected, 
+      colData_corrected[[var]]
+    )
+    
+    cat(sprintf("\nVariable: %s\n", var))
+    cat(sprintf("ANTES  - Silhouette: %.3f, Separación: %.3f\n", 
+                pre_metrics$silhouette_avg, pre_metrics$separation_score))
+    cat(sprintf("DESPUÉS - Silhouette: %.3f, Separación: %.3f\n", 
+                post_metrics$silhouette_avg, post_metrics$separation_score))
+    
+    # Calcular mejoras
+    sil_improvement <- post_metrics$silhouette_avg - pre_metrics$silhouette_avg
+    sep_improvement <- post_metrics$separation_score - pre_metrics$separation_score
+    
+    cat(sprintf("MEJORA - Silhouette: %.3f, Separación: %.3f\n", 
+                sil_improvement, sep_improvement))
+    
+    # Evaluación específica por tipo de variable
+    if (var %in% c("control", "Cond")) {
+      # Variables biológicas - esperamos mejora
+      if (sil_improvement > 0.1 || sep_improvement > 0.5) {
+        cat("✓ Mejora significativa en separación biológica\n")
+      } else if (sil_improvement > 0.01 || sep_improvement > 0.1) {
+        cat("⚡ Mejora marginal en separación biológica\n")
+      } else {
+        cat("⚠ Sin mejora notable en separación biológica\n")
+      }
+    } else {
+      # Variables técnicas - esperamos reducción
+      if (sil_improvement < -0.1 || sep_improvement < -1) {
+        cat("✓ Reducción significativa de batch effect\n")
+      } else if (sil_improvement < -0.01 || sep_improvement < -0.1) {
+        cat("⚡ Reducción marginal de batch effect\n")
+      } else {
+        cat("⚠ Batch effect no corregido efectivamente\n")
+      }
+    }
+  }
+}
+```
+
+```{r}
+cat("\n=== ANÁLISIS COMPLETO FINALIZADO ===\n")
+cat("El análisis multidimensional utilizó componentes que explican el 85% de la varianza\n")
+cat("para una evaluación más robusta de los batch effects y la separación biológica.\n")
+```
+
+# ============================================================================
+# 10. PCA Analysis
+# ============================================================================
+```{r}
+cat("\n=== ANÁLISIS DE COMPONENTES PRINCIPALES ===\n")
+```
+
+```{r}
+# Filtrado de genes con edgeR's cpm
+cpm_counts <- cpm(counts(dds_corrected))
+keep <- rowSums(cpm_counts > 1) >= floor(0.1 * ncol(dds_corrected))
+dds_gene <- dds_corrected[keep, ]
+
+cat("Genes después del filtrado CPM:", nrow(dds_gene), "\n")
+```
+
+```{r}
+# Variance stabilizing transformation (good for PCA)
+vsd <- vst(dds_corrected, blind=FALSE)
+```
+
+```{r}
+# Run PCA on the transformed data
+pcaData <- prcomp(t(assay(vsd)))
+
+# Check the percentage of variance explained
+summary(pcaData)
+```
+```{r}
+PCAscores <- pcaData $x
+eigenvalues <- pcaData$sdev^2
+PCAloadings <- pcaData $rotation
+```
+
+```{r}
+#Checking how the new dimensions are constructed
+p1 <- fviz_eig(pcaData) 
+
+ggsave("pca_eigenvalues.png", plot = p1, width = 8, height = 6, dpi = 300)
+
+# Calculate the contributions: (loading^2 * eigenvalue) / total contribution per PC
+contrib <- sweep(PCAloadings^2, 2, eigenvalues, "*")
+
+# Convert to percentage contribution
+contrib <- sweep(contrib, 2, colSums(contrib), "/") * 100  
+
+# Sum contributions for PC1 and PC2
+total_contrib <- contrib[, "PC1"] + contrib[, "PC2"]
+
+# Get the top 25 contributing genes
+top25_genes <- names(sort(total_contrib, decreasing = TRUE))[1:25]
+
+# Now plot only those in fviz_pca_var
+p2 <- fviz_pca_var(pcaData, 
+             col.var = "steelblue",
+             select.var = list(name = top25_genes))
+ggsave("pca_variable_contrib.png", plot = p2, width = 8, height = 6, dpi = 300)
+```
+```{r}
+# Explained variance from PCA
+explained_variance_ratio <- summary(pcaData)$importance["Proportion of Variance", ]
+cumulative_variance <- cumsum(explained_variance_ratio)
+
+# Prepare data for plotly
+plot_data <- data.frame(
+  Components = seq_along(cumulative_variance),
+  Explained_Variance = cumulative_variance
+)
+
+# Interactive cumulative explained variance plot
+library(plotly)
+fig <- plot_ly(
+  data = plot_data,
+  x = ~Components,
+  y = ~Explained_Variance,
+  type = 'scatter',
+  mode = 'lines+markers',
+  fill = 'tozeroy'
+) %>%
+  layout(
+    title = "Cumulative Explained Variance by PCA Components",
+    xaxis = list(title = "Number of Components"),
+    yaxis = list(title = "Cumulative Explained Variance")
+  )
+fig
+
+# Interactive cumulative explained variance plot
+htmlwidgets::saveWidget(fig, "explained_variance_plot.html", selfcontained = TRUE)
+```
+
+
+```{r}
+#Kaiser criterion
+eig.val=get_eigenvalue(pcaData)
+eig.val
+```
+
+
+```{r}
+# Assume pcaData is a prcomp object, and Cond is in another data frame, say metadata
+pca_DF <- as.data.frame(pcaData$x)  # Extract PC scores
+pca_DF$Cond <- colData(dds_gene)$Cond       # Add the grouping variable
+
+# Perform MANOVA
+manova_result <- manova(cbind(PC1, PC2, PC3, PC4, PC5, PC6, PC7, PC8, PC9, PC10, PC11, PC12, PC13, PC14, PC15) ~ Cond, data = pca_DF)
+
+# Summary of MANOVA
+summary(manova_result, test = "Wilks")
+```
+
+```{r}
+# Loop through each principal component to run univariate ANOVAs and Tukey HSD post-hoc tests
+pcs <- paste0("PC", 1:15)
+
+for (pc in pcs) {
+  cat("\n---------------------\n")
+  cat("Post-hoc analysis for", pc, "\n")
+  
+  # Run ANOVA
+  formula <- as.formula(paste(pc, "~ Cond"))
+  aov_model <- aov(formula, data = pca_DF)
+  aov_summary <- summary(aov_model)
+  print(aov_summary)
+  
+  # Extract p-value correctly
+  p_val <- aov_summary[[1]]["Cond", "Pr(>F)"]  # Safe extraction from first row and Pr(>F) column
+  
+  if (!is.na(p_val) && p_val < 0.05) {
+    cat("Tukey HSD results:\n")
+    tukey_result <- TukeyHSD(aov_model)
+    print(tukey_result)
+  } else {
+    cat("No significant effect of Cond on", pc, "- skipping Tukey HSD.\n")
+  }
+}
+```
+
+```{r}
+library(DESeq2)
+library(ggplot2)
+library(patchwork) 
+
+# Calc gene variance
+gene_vars <- apply(assay(vsd), 1, stats::var)
+top_genes <- names(sort(gene_vars, decreasing = TRUE))[1:4]  # Top 4 genes according to variance 
+
+# VSD for top genes
+vsd_df <- as.data.frame(t(assay(vsd)[top_genes, ]))
+vsd_df$sample <- rownames(vsd_df)
+vsd_df$Cond <- colData(vsd)$Cond  
+
+# PCA of VSD
+pca <- prcomp(t(assay(vsd)))
+
+# Data frame  PC1-PC4
+pca_df <- as.data.frame(pca$x[, 1:4])
+pca_df$sample <- rownames(pca_df)
+pca_df$Cond <- colData(vsd)$Cond
+
+# Density plot function
+plot_density <- function(df, var, title) {
+  ggplot(df, aes_string(x = var, fill = "Cond")) +
+    geom_density(alpha = 0.5) +
+    theme_minimal() +
+    labs(title = title)
+}
+
+# Plots for top genes
+vsd_plots <- lapply(top_genes, function(gene) plot_density(vsd_df, gene, paste("VSD:", gene)))
+
+# Plots for 4 PC
+pc_names <- paste0("PC", 1:4)
+pca_plots <- lapply(pc_names, function(pc) plot_density(pca_df, pc, pc))
+
+# Combine
+combined_plot <- (vsd_plots[[1]] | vsd_plots[[2]]) / 
+                 (vsd_plots[[3]] | vsd_plots[[4]]) / 
+                 (pca_plots[[1]] | pca_plots[[2]]) / 
+                 (pca_plots[[3]] | pca_plots[[4]])
+
+# Show th eplot
+print(combined_plot)
+
+# Combined VSD and PCA density plots
+ggsave("combined_density_plot.png", combined_plot, width = 12, height = 10, dpi = 300)
+```
+
+```{r}
+# Extract the first 3 PCs
+pca_df <- as.data.frame(pcaData$x[,1:3])
+
+# Add sample info (if you have colData)
+pca_df$Cond <- colData(dds_gene)$Cond
+```
+
+```{r}
+# 3D PCA Scatter Plot
+pca_3d <- plot_ly(pca_df, 
+                  x = ~PC1, y = ~PC2, z = ~PC3, 
+                  color = ~Cond, 
+                  colors = c("red", "blue", "green"), 
+                  type = 'scatter3d', 
+                  mode = 'markers') %>%
+  layout(title = "3D PCA")
+
+pca_3d
+
+# 3D PCA plot
+htmlwidgets::saveWidget(pca_3d, "pca_3d_plot.html", selfcontained = TRUE)
+```
+
+```{r}
+# Create the 3 plots WITHOUT layout titles
+p1 <- plot_ly(pca_df, x = ~PC1, y = ~PC2, color = ~Cond,
+              type = 'scatter', mode = 'markers',
+              legendgroup = ~Cond, showlegend = TRUE)
+
+p2 <- plot_ly(pca_df, x = ~PC1, y = ~PC3, color = ~Cond,
+              type = 'scatter', mode = 'markers',
+              legendgroup = ~Cond, showlegend = FALSE)
+
+p3 <- plot_ly(pca_df, x = ~PC2, y = ~PC3, color = ~Cond,
+              type = 'scatter', mode = 'markers',
+              legendgroup = ~Cond, showlegend = FALSE)
+
+# Combine the plots in one row
+combined_plot <- subplot(p1, p2, p3,
+                         nrows = 1,
+                         margin = 0.2,
+                         widths = c(0.33, 0.33, 0.33),  # Equal widths
+                         titleX = TRUE, titleY = TRUE)
+
+# Add titles as annotations
+annotations <- list(
+  list(x = 0.17, y = 1.05, text = "PC1 vs PC2", showarrow = FALSE, xref = "paper", yref = "paper", font = list(size = 14)),
+  list(x = 0.5, y = 1.05, text = "PC1 vs PC3", showarrow = FALSE, xref = "paper", yref = "paper", font = list(size = 14)),
+  list(x = 0.83, y = 1.05, text = "PC2 vs PC3", showarrow = FALSE, xref = "paper", yref = "paper", font = list(size = 14))
+)
+
+# Final layout with legend and annotations
+combined_plot <- combined_plot %>%
+  layout(
+    annotations = annotations,
+    legend = list(
+      title = list(text = "Condition"),
+      x = 1.05,
+      y = 0.5,
+      traceorder = 'normal',
+      font = list(family = "Arial", size = 12, color = "black"),
+      bgcolor = 'rgba(255, 255, 255, 0.5)',
+      bordercolor = 'black',
+      borderwidth = 1
+    )
+  )
+
+# Show the final plot
+combined_plot
+
+# Save as an HTML file
+htmlwidgets::saveWidget(combined_plot, "plotpca.html")
+```
+
+# ============================================================================
+# 10. ANÁLISIS DE EXPRESIÓN DIFERENCIAL
+# ============================================================================
+```{r}
+cat("\n=== ANÁLISIS DE EXPRESIÓN DIFERENCIAL ===\n")
+```
+
+```{r}
+# Reordenar niveles para que "no" sea la referencia
+dds_corrected$control <- relevel(dds_gene$control, ref = "no")
+
+# Vuelve a ejecutar DESeq2
+dds_corrected <- DESeq(dds_corrected)
+resultsNames(dds_corrected)
+
+# Obtener resultados
+res_control <- results(dds_corrected, contrast = c("control", "yes", "no"))
+res_control_ordered <- res_control[order(res_control$padj), ]
+
+# Filtrar por p-valor ajustado < 0.05
+deg_control_significant <- res_control_ordered[!is.na(res_control_ordered$padj) & res_control_ordered$padj < 0.05, ]
+
+cat("Número de genes diferencialmente expresados (padj < 0.05):", nrow(deg_control_significant), "\n")
+cat("Genes upregulados:", sum(deg_control_significant$log2FoldChange > 0), "\n")
+cat("Genes downregulados:", sum(deg_control_significant$log2FoldChange < 0), "\n")
+```
+
+```{r}
+# Guardar resultados DE
+write.csv(as.data.frame(deg_control_significant), "genes_diferencialmente_expresados.csv")
+```
+
+# ============================================================================
+# 11. CLUSTERING DE MUESTRAS
+# ============================================================================
+```{r}
+cat("\n=== CLUSTERING DE MUESTRAS ===\n")
+```
+
+```{r}
+set.seed(123)
+# Use your corrected VST data
+vsd_corrected <- vst(dds_corrected, blind = FALSE)
+vst_matrix <- assay(vsd_corrected)
+print(paste("Original matrix dimensions:", nrow(vst_matrix), "x", ncol(vst_matrix)))
+
+# Filter VST matrix to exclude control samples
+treated_samples <- colData(dds_corrected)$control == "no"
+vsd_corrected <- vsd_corrected[, treated_samples]
+vst_matrix<- assay(vsd_corrected)
+
+# Verify the filtering
+print(paste("Filtered matrix dimensions:", nrow(vst_matrix), "x", ncol(vst_matrix)))
+```
+
+```{r}
+# Calculate MAD for gene selection
+gene_mads <- apply(vst_matrix, 1, mad)
+mad_threshold <- quantile(gene_mads, 0.75)  # Top 25% most variable
+highly_variable_genes <- names(gene_mads[gene_mads >= mad_threshold])
+filtered_matrix <- vst_matrix[highly_variable_genes, ]
+
+# Optional: Gene median centering for correlation-based clustering
+filtered_matrix <- sweep(filtered_matrix, 1, apply(filtered_matrix, 1, median, na.rm = TRUE))
+```
+
+```{r}
+# Set up output directory
+results_dir <- "C:/Users/Usuario/Desktop/consensus"
+dir.create(results_dir, showWarnings = FALSE)
+
+# Run ConsensusClusterPlus with optimal parameters
+cc_results <- ConsensusClusterPlus(
+  d = filtered_matrix,
+  maxK = 10,                    # Evaluate up to 10 clusters
+  reps = 1000,                  # High repetitions for stability
+  pItem = 0.8,                  # 80% sample resampling
+  pFeature = 1.0,               # Use all selected genes
+  clusterAlg = "hc",            # Hierarchical clustering
+  distance = "pearson",         # Correlation-based distance
+  innerLinkage = "ward.D2",     # Ward linkage for better separation
+  finalLinkage = "ward.D2",     # Consistent linkage method
+  seed = 123456,                # Reproducibility
+  title = results_dir,
+  plot = "png"                  # Generate diagnostic plots
+)
+```
+
+```{r}
+# Calculate PAC for each k
+calculate_pac <- function(consensus_results, lower = 0.1, upper = 0.9) {
+  pac_values <- sapply(2:length(consensus_results), function(k) {
+    consensus_matrix <- consensus_results[[k]]$consensusMatrix
+    lower_tri_values <- consensus_matrix[lower.tri(consensus_matrix)]
+    ecdf_func <- ecdf(lower_tri_values)
+    pac <- ecdf_func(upper) - ecdf_func(lower)
+    return(pac)
+  })
+  names(pac_values) <- paste0("K=", 2:length(consensus_results))
+  return(pac_values)
+}
+
+pac_values <- calculate_pac(cc_results)
+optimal_k_pac <- which.min(pac_values) + 1  # +1 because PAC starts from k=2
+```
+
+```{r}
+# Calculate delta area from CDF plots
+delta_area <- sapply(2:(length(cc_results)-1), function(k) {
+  current_cdf <- cc_results[[k]]$consensusCDF
+  next_cdf <- cc_results[[k+1]]$consensusCDF
+  delta <- abs(sum(next_cdf) - sum(current_cdf))
+  return(delta)
+})
+
+# Look for elbow point where delta area plateaus
+plot(2:(length(cc_results)-1), delta_area, type = "b", 
+     xlab = "Number of Clusters (k)", ylab = "Delta Area",
+     main = "Delta Area Analysis for Optimal k Selection")
+```
+
+```{r}
+library(cluster)
+
+silhouette_scores <- sapply(2:10, function(k) {
+  cluster_assignments <- cc_results[[k]]$consensusClass
+  consensus_matrix <- cc_results[[k]]$consensusMatrix
+  dist_matrix <- as.dist(1 - consensus_matrix)
+  sil_result <- silhouette(cluster_assignments, dist_matrix)
+  return(mean(sil_result[, 3]))
+})
+
+names(silhouette_scores) <- paste0("K=", 2:10)
+```
+
+```{r}
+# Evaluate consensus matrix quality for each k
+evaluate_cluster_quality <- function(cc_results, k) {
+  consensus_matrix <- cc_results[[k]]$consensusMatrix
+  cluster_assignments <- cc_results[[k]]$consensusClass
+  
+  # Within-cluster consensus (should be high)
+  within_cluster_consensus <- sapply(unique(cluster_assignments), function(cluster_id) {
+    cluster_samples <- which(cluster_assignments == cluster_id)
+    if (length(cluster_samples) > 1) {
+      cluster_matrix <- consensus_matrix[cluster_samples, cluster_samples]
+      mean(cluster_matrix[upper.tri(cluster_matrix)])
+    } else {
+      1.0
+    }
+  })
+  
+  # Between-cluster consensus (should be low)
+  between_cluster_consensus <- sapply(1:(length(unique(cluster_assignments))-1), function(i) {
+    cluster_i <- which(cluster_assignments == unique(cluster_assignments)[i])
+    cluster_j <- which(cluster_assignments == unique(cluster_assignments)[i+1])
+    mean(consensus_matrix[cluster_i, cluster_j])
+  })
+  
+  return(list(
+    within_consensus = mean(within_cluster_consensus),
+    between_consensus = mean(between_cluster_consensus),
+    separation_score = mean(within_cluster_consensus) - mean(between_cluster_consensus)
+  ))
+}
+
+# Evaluate quality for different k values
+quality_metrics <- lapply(2:8, function(k) {
+  metrics <- evaluate_cluster_quality(cc_results, k)
+  metrics$k <- k
+  return(metrics)
+})
+```
+
+```{r}
+# Calculate item and cluster consensus
+icl_results <- calcICL(cc_results, title = results_dir, plot = "png")
+
+# Examine cluster consensus scores
+cluster_consensus <- icl_results$clusterConsensus
+item_consensus <- icl_results$itemConsensus
+
+# Identify stable clusters (consensus > 0.8)
+stable_clusters <- cluster_consensus[cluster_consensus[, "clusterConsensus"] > 0.8, ]
+```
+
+```{r}
+# Print PAC values for optimal k selection
+print("PAC Values:")
+print(pac_values)
+print(paste("Optimal k based on PAC:", optimal_k_pac))
+
+# Print silhouette scores
+print("Silhouette Scores:")
+print(silhouette_scores)
+print(paste("Best k based on silhouette:", names(silhouette_scores)[which.max(silhouette_scores)]))
+
+# Print quality metrics summary
+print("Quality Metrics Summary:")
+quality_summary <- do.call(rbind, lapply(quality_metrics, function(x) {
+  data.frame(k = x$k, within_consensus = x$within_consensus, 
+             between_consensus = x$between_consensus, 
+             separation_score = x$separation_score)
+}))
+print(quality_summary)
+
+# Print cluster consensus results
+print("Cluster Consensus (ICL Results):")
+print(cluster_consensus)
+
+```
+
+
+```{r}
+# Determine optimal k from multiple metrics
+optimal_k <- 3  # Replace with your determined optimal k
+
+treated_metadata <- colData(dds_corrected)[treated_samples, ]
+
+# Extract final cluster assignments
+final_clusters <- cc_results[[optimal_k]]$consensusClass
+cluster_results <- data.frame(
+  Sample = names(final_clusters),
+  Cluster = as.factor(final_clusters),
+  Treatment = treated_metadata$Cond,  # Add metadata for validation
+  stringsAsFactors = FALSE
+)
+
+# Examine cluster composition
+cluster_composition <- table(cluster_results$Cluster, cluster_results$Treatment)
+print(cluster_composition)
+```
+
+```{r}
+# Calculate cluster purity (how well clusters separate by treatment)
+cluster_purity <- apply(cluster_composition, 1, max) / rowSums(cluster_composition)
+
+# Mixed clusters (purity < 0.8) indicate interesting expression patterns
+mixed_clusters <- which(cluster_purity < 0.8)
+
+# Export results for downstream analysis
+write.csv(cluster_results, "consensus_cluster_assignments.csv", row.names = FALSE)
+```
+
+```{r}
+# Create annotation for samples
+annotation_col <- data.frame(
+  Cluster = as.factor(final_clusters),
+  Treatment = treated_metadata$Cond,
+  row.names = colnames(filtered_matrix)
+)
+
+# Generate cluster-specific heatmap
+pheatmap(
+  filtered_matrix,
+  scale = "row",
+  clustering_distance_rows = "correlation",
+  clustering_distance_cols = "correlation",
+  annotation_col = annotation_col,
+  show_rownames = FALSE,
+  show_colnames = FALSE,
+  main = paste0("Consensus Clustering Results (k=", optimal_k, ")"),
+  filename = "consensus_clustering_heatmap.pdf",
+  width = 12,
+  height = 10
+)
+```
+
+```{r}
+# Find cluster-specific gene signatures
+cluster_signatures <- lapply(unique(final_clusters), function(cluster_id) {
+  cluster_samples <- names(final_clusters)[final_clusters == cluster_id]
+  other_samples <- names(final_clusters)[final_clusters != cluster_id]
+  
+  # Calculate mean expression differences
+  cluster_means <- rowMeans(filtered_matrix[, cluster_samples, drop = FALSE])
+  other_means <- rowMeans(filtered_matrix[, other_samples, drop = FALSE])
+  fold_changes <- cluster_means - other_means
+  
+  # Return top upregulated genes for this cluster
+  top_genes <- names(sort(fold_changes, decreasing = TRUE))[1:50]
+  return(top_genes)
+})
+
+names(cluster_signatures) <- paste0("Cluster_", unique(final_clusters))
+```
+
+```{r}
+# Test parameter sensitivity
+stability_test <- ConsensusClusterPlus(
+  d = filtered_matrix,
+  maxK = optimal_k,
+  reps = 1000,
+  pItem = 0.9,        # Different resampling proportion
+  pFeature = 0.8,     # Feature resampling
+  clusterAlg = "hc",
+  distance = "pearson",
+  seed = 654321,      # Different seed
+  title = paste0(results_dir, "_stability"),
+  plot = "png"
+)
+
+# Compare cluster assignments
+assignment_correlation <- cor(final_clusters, stability_test[[optimal_k]]$consensusClass)
+```
+```{r}
+# Print final cluster composition
+print("Final Cluster Composition:")
+print(cluster_composition)
+print("Cluster Purity:")
+print(cluster_purity)
+```
+```{r}
+# Function to extract and display consensus matrices
+extract_consensus_matrix <- function(results, k) {
+  consensus_matrix <- results[[k]]$consensusMatrix
+  heatmap(consensus_matrix, 
+          main = paste("Consensus Matrix for k =", k),
+          col = colorRampPalette(c("white", "blue"))(100))
+  return(consensus_matrix)
+}
+```
+
+```{r}
+# 1. Extract and display consensus matrix for k=3
+consensus_matrix_k3 <- extract_consensus_matrix(cc_results, 3)
+```
+
+# ============================================================================
+# 12. EXPORTAR CLUSTERS COMO CSV
+# ============================================================================
+```{r}
+cat("\n=== EXPORTANDO CLUSTERS ===\n")
+```
+
+```{r}
+# Create a vector of cluster assignments for all samples
+cluster_vector <- rep(NA, ncol(dds_corrected))
+cluster_vector[treated_samples] <- final_clusters
+
+cluster_vector[is.na(cluster_vector)] <- "control"
+
+# Add the cluster assignments to colData
+colData(dds_corrected)$cluster <- cluster_vector
+
+colData_with_clusters <- as.data.frame(colData(dds_corrected))
+write.csv(colData_with_clusters, file = "colData_filtered_with_clusters.csv", row.names = TRUE)
+write.xlsx(colData_with_clusters, file = "colData_with_clusters.xlsx", rowNames = TRUE)
+```
+
+# ============================================================================
+# 13. RESUMEN FINAL Y COMPARACIÓN DE HEATMAPS
+# ============================================================================
+```{r}
+cat("\n=== RESUMEN DEL ANÁLISIS ===\n")
+cat("Total de muestras analizadas:", nrow(colData), "\n")
+cat("Genes después del filtrado:", nrow(dds_gene), "\n")
+cat("Genes diferencialmente expresados:", nrow(deg_control_significant), "\n")
+cat("Número de clusters identificados:", optimal_k, "\n")
+cat("Variables sustituto (SVA):", ifelse(exists("n.sv"), n.sv, 0), "\n")
+
+cat("\n=== EVALUACIÓN DE LA CORRECCIÓN BATCH ===\n")
+cat("Los heatmaps de distancia entre muestras permiten evaluar:\n")
+cat("1. Agrupación de muestras antes de la corrección\n")
+cat("2. Efectividad de la corrección batch\n")
+cat("3. Preservación de diferencias biológicas\n")
+
+cat("\n¡Análisis completado exitosamente!\n")
+cat("Archivos generados:\n")
+cat("- sample_distance_heatmap_antes_correccion.pdf\n")
+cat("- sample_distance_heatmap_despues_correccion.pdf\n")
+cat("- genes_diferencialmente_expresados.csv\n")
+cat("- heatmap_clustering_muestras.pdf\n")
+cat("- cluster_X_muestras.csv (para cada cluster)\n")
+cat("- resumen_clustering.csv\n")
+```

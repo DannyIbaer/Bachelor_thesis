@@ -1,0 +1,1641 @@
+---
+title: "2.Pathway_dys"
+author: "Daniel Bernad Ibáñez"
+date: "2025-05-07"
+output: html_document
+---
+
+```{r, include=FALSE, echo=FALSE, results='hide'}
+# Function to install and load packages
+install_and_load <- function(packages) {
+  # Detect Bioconductor packages
+  bioc_packages <- c("clusterProfiler", "org.Hs.eg.db", "ReactomePA",
+  "dorothea", "enrichplot")
+  
+  for (pkg in packages) {
+    if (!require(pkg, character.only = TRUE)) {
+      if (pkg %in% bioc_packages) {
+        # Install BiocManager if not available
+        if (!requireNamespace("BiocManager", quietly = TRUE)) {
+          install.packages("BiocManager")
+        }
+        BiocManager::install(pkg, update = FALSE, ask = FALSE)
+      } else {
+        install.packages(pkg, dependencies = TRUE)
+      }
+      library(pkg, character.only = TRUE)
+    }
+  }
+}
+
+```
+
+```{r, include=FALSE, echo=FALSE, results='hide'}
+if (!requireNamespace("reactome.db", quietly = TRUE)) {
+          install.packages("C:/Users/Usuario/Downloads/reactome.db_1.86.2.tar.gz",
+                 repos = NULL, type = "source")}
+
+# List of required packages
+required_packages <- c(
+  "clusterProfiler", "org.Hs.eg.db",
+  "dplyr", "readr", "tibble", "dorothea", "openxlsx",
+  "tidyverse", "plotly", "clusterProfiler", "org.Hs.eg.db",
+  "ggplot2", "BiocManager", "writexl", "enrichplot"
+)
+
+# Install and load packages
+cat("Installing and loading libraries...\n")
+install_and_load(required_packages)
+```
+
+##.......................................................DYSFUNCTION VS CONTROL.......................................................
+```{r}
+library(readxl)
+res_gene_dys_annotated <- read_excel("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Data/dys/res_gene_dys_annotated.xlsx")
+```
+
+```{r}
+# Filter genes with adjusted p-value < 0.05
+significant_res_dys_annotated <- res_gene_dys_annotated[which(res_gene_dys_annotated$padj < 0.05), ]
+
+# Check how many significant genes you have
+nrow(significant_res_dys_annotated)
+```
+
+```{r}
+# Split into upregulated (log2FoldChange > 0) and downregulated (log2FoldChange < 0)
+up_dys <- significant_res_dys_annotated[which(significant_res_dys_annotated$log2FoldChange > 1), ]
+down_dys <- significant_res_dys_annotated[which(significant_res_dys_annotated$log2FoldChange < -1), ]
+
+# Check how many you have in each group
+nrow(up_dys)
+nrow(down_dys)
+
+# Optional: view top few from each
+head(up_dys)
+head(down_dys)
+```
+
+
+## UPREGULATED
+```{r}
+# Sort table by baseMean in ascending order
+up_dys_sorted <- up_dys[order(up_dys$baseMean),]
+
+#Calculate total number of rows (genes)
+n <- nrow(up_dys_sorted)
+
+# Find median
+median_pos <- ceiling(n / 2)
+
+# Calculate Q1 position of the median
+q1_of_median <- ceiling ((median_pos + 1)/4)
+
+# Filter out low baseMean genes
+up_dys_filtered <- up_dys_sorted[which(up_dys_sorted$baseMean >= q1_of_median), ]
+
+# Check how many genes are left
+nrow(up_dys_filtered)
+
+# Optional: preview the filtered table
+head(up_dys_filtered)
+```
+
+```{r}
+# Convert Ensembl IDs to Entrez IDs
+gene.df <- bitr(up_dys_filtered$GENEID, fromType = "ENSEMBL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+# Merge with filtered table to retain original data
+up_dys_filtered_annotated <- merge(up_dys_filtered, gene.df, by.x = "GENEID", by.y = "ENSEMBL")
+
+# Check the first few rows after annotation
+head(up_dys_filtered_annotated)
+```
+
+-------------------------------------------- ENRICHMENT - GO--------------------------------------------
+```{r}
+# Perform GO enrichment analysis 
+ego_up_dys <- enrichGO(gene = up_dys_filtered_annotated$ENTREZID,
+                   OrgDb = org.Hs.eg.db,
+                   keyType = "ENTREZID", # We use the entrez IDs mapped earlier as they lead to less issues downstream
+                   ont = "ALL", # i.e. Cellular Components, Molecular Mechanisms and Biological Processes 
+                   pAdjustMethod = "BH",
+                   pvalueCutoff = 0.05,
+                   qvalueCutoff = 0.2,
+                   readable = TRUE,
+                   minGSSize = 10,      # Only include pathways with ≥10 genes
+                   maxGSSize = 1000     # Exclude very large, generic pathways
+  )
+
+tab_go_up_dys <- as.data.frame(ego_up_dys@result)
+
+# View the first few rows of the combined results
+head(ego_up_dys)
+```
+```{r}
+# Write the pathway data to an Excel file
+write.xlsx(tab_go_up_dys, file = "C:/Users/Usuario/Desktop/BACHELORS/Rdata/Data/dys/UP/GO_up_dys.xlsx", rowNames = TRUE)
+```
+
+
+## Filtering and visualization
+```{r}
+# Plot the filtered results using dotplot (still an enrichResult object)
+dotplot(ego_up_dys, showCategory = 30)
+
+# Plot the filtered results using barplot (also for the enrichResult object)
+barplot(ego_up_dys, showCategory = 30)
+```
+
+## Dotplot
+```{r}
+# Subset and order the data by RichFactor
+plot_data <- ego_up_dys@result
+
+plot_data <- plot_data[plot_data$p.adjust <= 0.05, ]
+plot_data <- plot_data[order(plot_data$Count, decreasing = TRUE), ]
+plot_data <- head(plot_data, 30)  # Take top 30 pathways
+
+# Dotplot using ggplot2 
+p <- ggplot(plot_data, aes(x = reorder(Description, Count,), y = Count, 
+                      size = Count, color = pvalue)) +
+  geom_point() +
+  coord_flip() +  # Flip the coordinates for better readability
+  labs(x = "GO Terms", y = "GeneRatio", title = "Upregulated GO Term Enrichment for dysfunction") +
+  scale_size_continuous(name = "Gene Count") +
+  scale_color_gradient(low = "blue", high = "red") +  # Color gradient based on p-value
+  scale_shape_manual(values = c(16, 17, 18)) +  # Manually set different shapes for BP, MF, CC
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels for better readability
+
+# Save the plot as a PNG file
+  ggsave("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/UPggGO_dys_pathways.jpg", plot = p, width = 10, height = 8, dpi = 300)
+```
+
+```{r}
+# Extract the enrichment results
+plot_data <- ego_up_dys@result
+
+# Filter by adjusted p-value threshold
+plot_data <- plot_data[plot_data$p.adjust <= 0.05, ]
+
+# Convert GeneRatio from fraction (e.g., "5/200") to numeric (e.g., 0.025)
+plot_data$GeneRatio <- sapply(plot_data$GeneRatio, function(x) {
+  parts <- unlist(strsplit(x, "/"))
+  as.numeric(parts[1]) / as.numeric(parts[2])
+})
+
+# Order by GeneRatio (descending) and keep top 30 enriched terms
+plot_data <- plot_data[order(plot_data$GeneRatio, decreasing = TRUE), ]
+plot_data <- head(plot_data, 30)
+
+# Create dotplot
+p <- ggplot(plot_data, aes(x = GeneRatio, y = reorder(Description, GeneRatio),
+                           size = Count, color = p.adjust)) +
+  geom_point() +
+  labs(title = "Upregulated GO Term Enrichment for Dysfunction",
+       x = "GeneRatio", y = "GO Terms",
+       size = "Gene Count", color = "Adjusted p-value") +
+  scale_color_gradient(low = "red", high = "blue", name = "Adj. p-value") +  # Red = more significant
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10),
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"))
+
+# Save the plot to disk
+ggsave("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/UPggGO_dys_pathways.jpg", 
+       plot = p, width = 10, height = 8, dpi = 300)
+
+```
+
+
+-------------------------------------------- ENRICHMENT - KEGG --------------------------------------------
+```{r}
+# Perform KEGG enrichment analysis 
+ekegg_up_dys <- enrichKEGG(
+  gene          = up_dys_filtered_annotated$ENTREZID,
+  organism      = 'hsa',
+  keyType       = "ncbi-geneid", 
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  minGSSize = 10,      # Only include pathways with ≥10 genes
+  maxGSSize = 1000     # Exclude very large, generic pathways
+)
+
+tab_kegg_up_dys <- as.data.frame(ekegg_up_dys)
+
+head(tab_kegg_up_dys)
+```
+# Annotation
+```{r}
+# Load the necessary library for gene ID conversion
+library(org.Hs.eg.db)
+
+# Sample data: Let's assume your table is named `up_dys_filtered_annotated`
+# where "geneID" is a column with ENTREZ IDs in the format you mentioned (e.g., "283/20202/20202/")
+
+# Step 1: Split the "geneID" column into individual ENTREZ IDs
+tab_kegg_up_dys$geneID_split <- strsplit(as.character(tab_kegg_up_dys$geneID), "/")
+
+# Step 2: Define a function to map ENTREZ IDs to gene symbols
+map_entrez_to_symbol <- function(entrez_ids) {
+  # Remove any empty strings caused by trailing slashes
+  entrez_ids <- entrez_ids[entrez_ids != ""]
+  # Use mapIds to get gene symbols from ENTREZ IDs
+  gene_symbols <- mapIds(org.Hs.eg.db, keys = entrez_ids, column = "SYMBOL", keytype = "ENTREZID", multiVals = "first")
+  # Return the gene symbols as a character vector
+  return(gene_symbols)
+}
+
+# Step 3: Apply the mapping function to each row (the "geneID_split" column)
+tab_kegg_up_dys$GENENAME <- sapply(tab_kegg_up_dys$geneID_split, map_entrez_to_symbol)
+
+# Step 4: Reassemble the gene symbols into a single string (separated by "/")
+tab_kegg_up_dys$GENENAME <- sapply(tab_kegg_up_dys$GENENAME, function(x) paste(x, collapse = "/"))
+
+# View the updated table with the combined gene symbols column
+head(tab_kegg_up_dys)
+
+# Step 1: Replace the 'geneID' column with the values from 'GENENAME' column
+tab_kegg_up_dys$geneID <- tab_kegg_up_dys$GENENAME
+
+# Step 2: Remove the 'GENENAME' column
+tab_kegg_up_dys$GENENAME <- NULL
+
+head(tab_kegg_up_dys)
+```
+```{r}
+# Write the pathway data to an Excel file
+write.xlsx(tab_kegg_up_dys, file = "C:/Users/Usuario/Desktop/BACHELORS/Rdata/Data/dys/UP/kegg_up_dys.xlsx", rowNames = TRUE)
+```
+
+
+# Visualization
+
+```{r}
+# Plot the filtered results using dotplot (still an enrichResult object)
+dotplot(ekegg_up_dys, showCategory = 30)
+
+# Plot the filtered results using barplot (also for the enrichResult object)
+barplot(ekegg_up_dys, showCategory = 30)
+```
+
+# Dotplot
+```{r}
+# Subset and order the data by RichFactor
+plot_data <- ekegg_up_dys@result
+
+# Filter by adjusted p-value threshold
+plot_data <- plot_data[plot_data$p.adjust <= 0.05, ]
+
+# Convert GeneRatio from fraction (e.g., "5/200") to numeric (e.g., 0.025)
+plot_data$GeneRatio <- sapply(plot_data$GeneRatio, function(x) {
+  parts <- unlist(strsplit(x, "/"))
+  as.numeric(parts[1]) / as.numeric(parts[2])
+})
+
+# Order by GeneRatio (descending) and keep top 30 enriched terms
+plot_data <- plot_data[order(plot_data$GeneRatio, decreasing = TRUE), ]
+plot_data <- head(plot_data, 30)
+
+# Create dotplot
+p <- ggplot(plot_data, aes(x = GeneRatio, y = reorder(Description, GeneRatio),
+                           size = Count, color = p.adjust)) +
+  geom_point() +
+  labs(title = "Upregulated KEGG Pathway Enrichment for Dysfunction",
+       x = "GeneRatio", y = "KEGG Pathway",
+       size = "Gene Count", color = "Adjusted p-value") +
+  scale_color_gradient(low = "red", high = "blue", name = "Adj. p-value") +  # Red = more significant
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10),
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"))
+
+# Save the plot to disk
+ggsave("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/UPggKEGG_dys_pathways.jpg", 
+       plot = p, width = 10, height = 8, dpi = 300)
+```
+
+-------------------------------------------- ENRICHMENT - REAC --------------------------------------------
+```{r}
+ereact_up_dys <- enrichPathway(
+  gene = up_dys_filtered_annotated$ENTREZID,
+  organism = "human",
+  pAdjustMethod = "BH",
+  qvalueCutoff = 0.05,
+  readable = TRUE,
+  minGSSize = 10,      # Only include pathways with ≥10 genes
+  maxGSSize = 1000     # Exclude very large, generic pathways
+) 
+
+tab_react_up_dys <- as.data.frame(ereact_up_dys@result)
+
+head(ereact_up_dys)
+```
+
+```{r}
+# Write the pathway data to an Excel file
+write.xlsx(tab_react_up_dys, file = "C:/Users/Usuario/Desktop/BACHELORS/Rdata/Data/dys/UP/react_up_dys.xlsx", rowNames = TRUE)
+```
+
+# Visualization
+```{r}
+# Plot the filtered results using dotplot (still an enrichResult object)
+dotplot(ereact_up_dys, showCategory = 30)
+
+# Plot the filtered results using barplot (also for the enrichResult object)
+barplot(ereact_up_dys, showCategory = 30)
+```
+
+```{r}
+# Subset and order the data by RichFactor
+plot_data <- ereact_up_dys@result
+# Filter by adjusted p-value threshold
+plot_data <- plot_data[plot_data$p.adjust <= 0.05, ]
+
+# Convert GeneRatio from fraction (e.g., "5/200") to numeric (e.g., 0.025)
+plot_data$GeneRatio <- sapply(plot_data$GeneRatio, function(x) {
+  parts <- unlist(strsplit(x, "/"))
+  as.numeric(parts[1]) / as.numeric(parts[2])
+})
+
+# Order by GeneRatio (descending) and keep top 30 enriched terms
+plot_data <- plot_data[order(plot_data$GeneRatio, decreasing = TRUE), ]
+plot_data <- head(plot_data, 30)
+
+# Create dotplot
+p <- ggplot(plot_data, aes(x = GeneRatio, y = reorder(Description, GeneRatio),
+                           size = Count, color = p.adjust)) +
+  geom_point() +
+  labs(title = "Upregulated REAC Term Enrichment for Dysfunction",
+       x = "GeneRatio", y = "REAC Terms",
+       size = "Gene Count", color = "Adjusted p-value") +
+  scale_color_gradient(low = "red", high = "blue", name = "Adj. p-value") +  # Red = more significant
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10),
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"))
+
+# Save the plot to disk
+ggsave("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/UPggREAC_dys_pathways.jpg", 
+       plot = p, width = 10, height = 8, dpi = 300)
+```
+
+-------------------------------------------- ENRICHMENT - TF --------------------------------------------
+```{r}
+dorothea_hs <- dorothea::dorothea_hs
+
+dorothea_tf <- dorothea_hs %>%
+  dplyr::filter(confidence %in% c("A", "B")) %>%
+  dplyr::select(tf, target) %>%
+  dplyr::distinct()
+
+etf_up_dys <- enricher(
+  gene = up_dys_filtered_annotated$GENENAME,
+  TERM2GENE = dorothea_tf,
+  pAdjustMethod = "BH",
+  qvalueCutoff = 0.05,
+  minGSSize = 10,      # Only include pathways with ≥10 genes
+  maxGSSize = 1000     # Exclude very large, generic pathways
+) 
+
+tab_tf_up_dys <- as.data.frame(etf_up_dys@result)
+
+head(etf_up_dys)
+```
+
+```{r}
+# Write the pathway data to an Excel file
+write.xlsx(tab_tf_up_dys, file = "C:/Users/Usuario/Desktop/BACHELORS/Rdata/Data/dys/UP/TF_up_dys.xlsx", rowNames = TRUE)
+```
+
+# Visualization
+```{r}
+# Plot the filtered results using dotplot (still an enrichResult object)
+dotplot(etf_up_dys, showCategory = 30)
+
+# Plot the filtered results using barplot (also for the enrichResult object)
+barplot(etf_up_dys, showCategory = 30)
+```
+
+```{r}
+# Subset and order the data by RichFactor
+plot_data <- etf_up_dys@result
+
+# Filter by adjusted p-value threshold
+plot_data <- plot_data[plot_data$p.adjust <= 0.05, ]
+
+# Convert GeneRatio from fraction (e.g., "5/200") to numeric (e.g., 0.025)
+plot_data$GeneRatio <- sapply(plot_data$GeneRatio, function(x) {
+  parts <- unlist(strsplit(x, "/"))
+  as.numeric(parts[1]) / as.numeric(parts[2])
+})
+
+# Order by GeneRatio (descending) and keep top 30 enriched terms
+plot_data <- plot_data[order(plot_data$GeneRatio, decreasing = TRUE), ]
+plot_data <- head(plot_data, 30)
+
+# Create dotplot
+p <- ggplot(plot_data, aes(x = GeneRatio, y = reorder(Description, GeneRatio),
+                           size = Count, color = p.adjust)) +
+  geom_point() +
+  labs(title = "Upregulated TF Enrichment for Dysfunction",
+       x = "GeneRatio", y = "TF",
+       size = "Gene Count", color = "Adjusted p-value") +
+  scale_color_gradient(low = "red", high = "blue", name = "Adj. p-value") +  # Red = more significant
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10),
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"))
+
+# Save the plot to disk
+ggsave("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/UPggTF_dys_pathways.jpg", 
+       plot = p, width = 10, height = 8, dpi = 300)
+```
+
+-------------------------------------------- ENRICHMENT - MSigDB --------------------------------------------
+```{r}
+hallmark_gmt <- read.gmt("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Databases/h.all.v2024.1.Hs.symbols.gmt")
+
+c8_gmt <- read.gmt("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Databases/c8.all.v2024.1.Hs.symbols.gmt")
+
+# Hallmark ORA
+ehallmark_up_dys <- enricher(
+  gene = up_dys_filtered_annotated$GENENAME,
+  TERM2GENE = hallmark_gmt,
+  pAdjustMethod = "BH",
+  qvalueCutoff = 0.05,
+  minGSSize = 10,      # Only include pathways with ≥10 genes
+  maxGSSize = 1000     # Exclude very large, generic pathways
+)
+
+tab_hallmarks_up_dys <- as.data.frame(ehallmark_up_dys@result)
+
+# Marker Signatures ORA
+emarkers_up_dys <- enricher(
+  gene = up_dys_filtered_annotated$GENENAME,
+  TERM2GENE = c8_gmt,
+  pAdjustMethod = "BH",
+  qvalueCutoff = 0.05,
+  minGSSize = 10,      # Only include pathways with ≥10 genes
+  maxGSSize = 1000     # Exclude very large, generic pathways
+)
+
+tab_markers_up_dys <- as.data.frame(emarkers_up_dys@result)
+
+head (ehallmark_up_dys)
+head (emarkers_up_dys)
+```
+
+```{r}
+# Write the pathway data to an Excel file
+write.xlsx(tab_hallmarks_up_dys, file = "C:/Users/Usuario/Desktop/BACHELORS/Rdata/Data/dys/UP/HALLMARKS_up_dys.xlsx", rowNames = TRUE)
+```
+```{r}
+# Write the pathway data to an Excel file
+write.xlsx(tab_markers_up_dys, file = "C:/Users/Usuario/Desktop/BACHELORS/Rdata/Data/dys/UP/MARKERS_up_dys.xlsx", rowNames = TRUE)
+```
+
+# Visualization
+```{r}
+# Plot the filtered results using dotplot (still an enrichResult object)
+dotplot(ehallmark_up_dys, showCategory = 30)
+dotplot(emarkers_up_dys, showCategory = 30)
+
+# Plot the filtered results using barplot (also for the enrichResult object)
+barplot(ehallmark_up_dys, showCategory = 30)
+barplot(emarkers_up_dys, showCategory = 30)
+```
+
+```{r}
+# Subset and order the data by RichFactor
+plot_data <- ehallmark_up_dys@result
+
+# Filter by adjusted p-value threshold
+plot_data <- plot_data[plot_data$p.adjust <= 0.05, ]
+
+# Convert GeneRatio from fraction (e.g., "5/200") to numeric (e.g., 0.025)
+plot_data$GeneRatio <- sapply(plot_data$GeneRatio, function(x) {
+  parts <- unlist(strsplit(x, "/"))
+  as.numeric(parts[1]) / as.numeric(parts[2])
+})
+
+# Order by GeneRatio (descending) and keep top 30 enriched terms
+plot_data <- plot_data[order(plot_data$GeneRatio, decreasing = TRUE), ]
+plot_data <- head(plot_data, 30)
+
+# Create dotplot
+p <- ggplot(plot_data, aes(x = GeneRatio, y = reorder(Description, GeneRatio),
+                           size = Count, color = p.adjust)) +
+  geom_point() +
+  labs(title = "Upregulated Hallmark Enrichment for Dysfunction",
+       x = "GeneRatio", y = "Hallmarks",
+       size = "Gene Count", color = "Adjusted p-value") +
+  scale_color_gradient(low = "red", high = "blue", name = "Adj. p-value") +  # Red = more significant
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10),
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"))
+
+# Save the plot to disk
+ggsave("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/UPggHALLMARKS_dys_pathways.jpg", 
+       plot = p, width = 10, height = 8, dpi = 300)
+
+# Subset and order the data by RichFactor
+plot_data <- emarkers_up_dys@result
+
+# Filter by adjusted p-value threshold
+plot_data <- plot_data[plot_data$p.adjust <= 0.05, ]
+
+# Convert GeneRatio from fraction (e.g., "5/200") to numeric (e.g., 0.025)
+plot_data$GeneRatio <- sapply(plot_data$GeneRatio, function(x) {
+  parts <- unlist(strsplit(x, "/"))
+  as.numeric(parts[1]) / as.numeric(parts[2])
+})
+
+# Order by GeneRatio (descending) and keep top 30 enriched terms
+plot_data <- plot_data[order(plot_data$GeneRatio, decreasing = TRUE), ]
+plot_data <- head(plot_data, 30)
+
+# Create dotplot
+p <- ggplot(plot_data, aes(x = GeneRatio, y = reorder(Description, GeneRatio),
+                           size = Count, color = p.adjust)) +
+  geom_point() +
+  labs(title = "Upregulated Marker Enrichment for Dysfunction",
+       x = "GeneRatio", y = "MArkers",
+       size = "Gene Count", color = "Adjusted p-value") +
+  scale_color_gradient(low = "red", high = "blue", name = "Adj. p-value") +  # Red = more significant
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10),
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"))
+
+# Save the plot to disk
+ggsave("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/UPggMARKERS_dys_pathways.jpg", 
+       plot = p, width = 10, height = 8, dpi = 300)
+```
+
+-------------------------------------------- ORA results --------------------------------------------
+```{r}
+# Add the 'Source' column to each existing dataframe and fill with the appropriate value
+tab_go_up_dys$Source <- "GO"
+tab_kegg_up_dys$Source <- "KEGG"
+tab_react_up_dys$Source <- "reactome"
+tab_tf_up_dys$Source <- "TF"
+tab_hallmarks_up_dys$Source <- "MSigDB"
+
+### Combine All Results
+
+# Set thresholds
+pval_cutoff <-  1e-5
+GeneRatiomin <- 0.1
+
+# Combine all enrichment results and filter
+up_dys_enrich <- bind_rows(
+  tab_go_up_dys,
+  tab_kegg_up_dys,
+  tab_react_up_dys,
+  tab_tf_up_dys,
+  tab_hallmarks_up_dys,
+)
+# Convert GeneRatio from fraction (e.g., "5/200") to numeric (e.g., 0.025)
+up_dys_enrich$GeneRatio <- sapply(up_dys_enrich$GeneRatio, function(x) {
+  parts <- unlist(strsplit(x, "/"))
+  as.numeric(parts[1]) / as.numeric(parts[2])
+})
+
+# Apply the updated filter: 
+# 1. Keep pathways with RichFactor greater than Q1
+# 2. Keep pathways with count >= 5 genes
+up_dys_enrich_filtered <- up_dys_enrich %>%
+  dplyr::filter(
+    p.adjust <= pval_cutoff,
+    GeneRatio >= GeneRatiomin,             # Keep pathways with GeneRatio > 0.1
+    Count >= 3                           # Keep pathways with at least 3 genes
+  ) %>%
+  arrange(desc(GeneRatio))                  
+
+# Get top 20 pathways
+top_pathways <- up_dys_enrich_filtered %>% head(20)
+
+### Export
+library(writexl)
+write_xlsx(up_dys_enrich_filtered, "C:/Users/Usuario/Desktop/BACHELORS/Rdata/Data/up_dys_enrich_filtered.xlsx")
+
+# Function to convert categorical variables to Factors
+convert_to_Factors <- function(df) {
+  # Loop over each column
+  for (col in colnames(df)) {
+    # Check if the column is a character (categorical) type
+    if (is.character(df[[col]])) {
+      df[[col]] <- as.factor(df[[col]])  # Convert to Factor
+    }
+  }
+  return(df)  # Return the modified dataframe
+}
+
+# Apply the function to your dataframe
+fact.up_dys_enrich_filtered <- convert_to_Factors(up_dys_enrich_filtered)
+
+### 9. View top results
+head(up_dys_enrich_filtered)
+
+summary(fact.up_dys_enrich_filtered)
+```
+
+## Pathway to gene table
+```{r}
+df <- up_dys_enrich_filtered  #dataframe
+
+# Split geneID by "/" to separate the gene IDs
+gene_list <- strsplit(df$geneID, split = "/")
+
+# Get the max number of genes in any pathway to standardize column size
+max_genes <- max(sapply(gene_list, length))
+
+# Pad shorter gene lists with NA to match the max number of genes
+gene_matrix <- t(sapply(gene_list, function(x) {
+  length(x) <- max_genes  # pad with NAs
+  return(x)
+}))
+
+# Convert to data.frame and name columns
+gene_df <- as.data.frame(gene_matrix, stringsAsFactors = FALSE)
+colnames(gene_df) <- paste0("Gene_", seq_len(max_genes))
+
+# Combine with pathway ID and Description
+pathway_up_dys <- cbind(Pathway_ID = df$ID, gene_df)
+rownames(pathway_up_dys) <- df$Description
+
+# View the first few rows of the combined table
+head(pathway_up_dys)
+
+# Load library for writing Excel file
+library(openxlsx)
+
+# Write the pathway data to an Excel file
+write.xlsx(pathway_up_dys, file = "C:/Users/Usuario/Desktop/BACHELORS/Rdata/pathwaytogene_up_dys.xlsx", rowNames = TRUE)
+```
+
+# Gene Matrix
+
+```{r}
+# Create a dataframe to store pathway and gene symbols
+pathway_gene_symbols <- data.frame(Pathway = character(), GeneSymbols = character(), stringsAsFactors = FALSE)
+
+# Loop through the pathways and extrdys gene symbols
+for (i in 1:nrow(up_dys_enrich_filtered)) {
+  pathway_description <- up_dys_enrich_filtered$Description[i]  # Pathway description
+  
+  # Split geneID by "/" to get individual gene symbols
+  gene_symbols <- unlist(strsplit(up_dys_enrich_filtered$geneID[i], "/"))
+  
+  # Remove any empty or NA gene symbols (just in case)
+  gene_symbols <- gene_symbols[!is.na(gene_symbols) & gene_symbols != ""]
+  
+  # Combine gene symbols into a single string
+  gene_symbols_str <- paste(gene_symbols, collapse = ", ")
+  
+  # Add the pathway description and gene symbols to the dataframe
+  pathway_gene_symbols <- rbind(pathway_gene_symbols, data.frame(Pathway = pathway_description, GeneSymbols = gene_symbols_str, stringsAsFactors = FALSE))
+}
+
+# Check the final table of pathways and gene symbols
+print(pathway_gene_symbols)
+
+# Step 2: Prepare the data for creating the gene matrix
+
+# Create a vector of all unique gene symbols across the pathways
+unique_genes <- unique(unlist(strsplit(paste(pathway_gene_symbols$GeneSymbols, collapse = ","), ", ")))
+
+# Initialize the gene matrix: pathways as rows, gene symbols as columns
+gene_matrix <- matrix(0, nrow = length(pathway_gene_symbols$Pathway), ncol = length(unique_genes))
+
+# Assign row and column names to the matrix
+rownames(gene_matrix) <- pathway_gene_symbols$Pathway
+colnames(gene_matrix) <- unique_genes
+
+# Step 3: Fill the matrix: if a gene is associated with a pathway, set the corresponding entry to 1
+for (i in 1:nrow(gene_matrix)) {
+  # Get the genes for the current pathway
+  genes <- unlist(strsplit(pathway_gene_symbols$GeneSymbols[i], ", "))  # Split gene symbols by ", "
+  
+  # Ensure that the genes are valid column names
+  valid_genes <- genes[genes %in% colnames(gene_matrix)]
+  
+  # Set the matrix values to 1 for valid genes associated with the current pathway
+  gene_matrix[i, valid_genes] <- 1
+}
+
+# Step 4: Check the resulting gene matrix
+print(gene_matrix)
+
+# Step 5: Write the matrix to an Excel file
+library(openxlsx)
+write.xlsx(gene_matrix, file = ("C:/Users/Usuario/Desktop/BACHELORS/Rdata/genematrix_up_dys.xlsx"), rowNames = TRUE)
+```
+
+## DOWNREGULATED
+```{r}
+# Sort table by baseMean in ascending order
+down_dys_sorted <- down_dys[order(down_dys$baseMean),]
+
+#Calculate total number of rows (genes)
+n <- nrow(down_dys_sorted)
+
+# Find median
+median_pos <- ceiling(n / 2)
+
+# Calculate Q1 position of the median
+q1_of_median <- ceiling ((median_pos + 1)/4)
+
+# Filter out low baseMean genes
+down_dys_filtered <- down_dys_sorted[which(down_dys_sorted$baseMean >= q1_of_median), ]
+
+# Check how many genes are left
+nrow(down_dys_filtered)
+
+# Optional: preview the filtered table
+head(down_dys_filtered)
+```
+
+```{r}
+# Convert Ensembl IDs to Entrez IDs
+gene.df <- bitr(down_dys_filtered$GENEID, fromType = "ENSEMBL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+# Merge with filtered table to retain original data
+down_dys_filtered_annotated <- merge(down_dys_filtered, gene.df, by.x = "GENEID", by.y = "ENSEMBL")
+
+# Check the first few rows after annotation
+head(down_dys_filtered_annotated)
+
+```
+
+-------------------------------------------- ENRICHMENT - GO --------------------------------------------
+
+```{r}
+# Perform GO enrichment analysis 
+ego_down_dys <- enrichGO(gene = down_dys_filtered_annotated$ENTREZID,
+                   OrgDb = org.Hs.eg.db,
+                   keyType = "ENTREZID",
+                   ont = "ALL",
+                   pAdjustMethod = "BH",
+                   pvalueCutoff = 0.2,
+                   qvalueCutoff = 1,
+                   readable = TRUE
+)
+
+tab_go_down_dys <- as.data.frame(ego_down_dys@result)
+
+head(ego_down_dys)
+```
+```{r}
+# Write the pathway data to an Excel file
+write.xlsx(tab_go_down_dys, file = "C:/Users/Usuario/Desktop/BACHELORS/Rdata/Data/dys/DOWN/GO_down_dys.xlsx", rowNames = TRUE)
+```
+
+
+## Visualization
+```{r}
+dotplot(ego_down_dys, showCategory = 30)
+barplot(ego_down_dys, showCategory = 30)
+```
+
+## Dotplot
+```{r}
+plot_data <- ego_down_dys@result
+
+# Filter by adjusted p-value threshold
+plot_data <- plot_data[plot_data$p.adjust <= 0.05, ]
+
+# Convert GeneRatio from fraction (e.g., "5/200") to numeric (e.g., 0.025)
+plot_data$GeneRatio <- sapply(plot_data$GeneRatio, function(x) {
+  parts <- unlist(strsplit(x, "/"))
+  as.numeric(parts[1]) / as.numeric(parts[2])
+})
+
+# Order by GeneRatio (descending) and keep top 30 enriched terms
+plot_data <- plot_data[order(plot_data$GeneRatio, decreasing = TRUE), ]
+plot_data <- head(plot_data, 30)
+
+# Create dotplot
+p <- ggplot(plot_data, aes(x = GeneRatio, y = reorder(Description, GeneRatio),
+                           size = Count, color = p.adjust)) +
+  geom_point() +
+  labs(title = "Downregulated GO Term Enrichment for Dysfunction",
+       x = "GeneRatio", y = "GO Terms",
+       size = "Gene Count", color = "Adjusted p-value") +
+  scale_color_gradient(low = "red", high = "blue", name = "Adj. p-value") +  # Red = more significant
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10),
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"))
+
+# Save the plot to disk
+ggsave("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/DOWNggGO_dys_pathways.jpg", 
+       plot = p, width = 10, height = 8, dpi = 300)
+
+```
+
+-------------------------------------------- ENRICHMENT - KEGG --------------------------------------------
+```{r}
+ekegg_down_dys <- enrichKEGG(
+  gene          = down_dys_filtered_annotated$ENTREZID,
+  organism      = 'hsa',
+  keyType       = "ncbi-geneid",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  minGSSize = 10,
+  maxGSSize = 1000
+)
+
+tab_kegg_down_dys <- as.data.frame(ekegg_down_dys)
+
+head(tab_kegg_down_dys)
+```
+
+```{r}
+library(org.Hs.eg.db)
+
+tab_kegg_down_dys$geneID_split <- strsplit(as.character(tab_kegg_down_dys$geneID), "/")
+
+map_entrez_to_symbol <- function(entrez_ids) {
+  entrez_ids <- entrez_ids[entrez_ids != ""]
+  gene_symbols <- mapIds(org.Hs.eg.db, keys = entrez_ids, column = "SYMBOL", keytype = "ENTREZID", multiVals = "first")
+  return(gene_symbols)
+}
+
+tab_kegg_down_dys$GENENAME <- sapply(tab_kegg_down_dys$geneID_split, map_entrez_to_symbol)
+tab_kegg_down_dys$GENENAME <- sapply(tab_kegg_down_dys$GENENAME, function(x) paste(x, collapse = "/"))
+
+head(tab_kegg_down_dys)
+
+tab_kegg_down_dys$geneID <- tab_kegg_down_dys$GENENAME
+tab_kegg_down_dys$GENENAME <- NULL
+
+head(tab_kegg_down_dys)
+```
+
+```{r}
+write.xlsx(tab_kegg_down_dys, file = "C:/Users/Usuario/Desktop/BACHELORS/Rdata/Data/dys/DOWN/kegg_down_dys.xlsx", rowNames = TRUE)
+```
+
+# Visualization
+```{r}
+dotplot(ekegg_down_dys, showCategory = 30)
+barplot(ekegg_down_dys, showCategory = 30)
+```
+
+# Dotplot
+```{r}
+plot_data <- ekegg_down_dys@result
+
+# Filter by adjusted p-value threshold
+plot_data <- plot_data[plot_data$p.adjust <= 0.05, ]
+
+# Convert GeneRatio from fraction (e.g., "5/200") to numeric (e.g., 0.025)
+plot_data$GeneRatio <- sapply(plot_data$GeneRatio, function(x) {
+  parts <- unlist(strsplit(x, "/"))
+  as.numeric(parts[1]) / as.numeric(parts[2])
+})
+
+# Order by GeneRatio (descending) and keep top 30 enriched terms
+plot_data <- plot_data[order(plot_data$GeneRatio, decreasing = TRUE), ]
+plot_data <- head(plot_data, 30)
+
+# Create dotplot
+p <- ggplot(plot_data, aes(x = GeneRatio, y = reorder(Description, GeneRatio),
+                           size = Count, color = p.adjust)) +
+  geom_point() +
+  labs(title = "Downregulated KEGG pathways for Dysfunction",
+       x = "GeneRatio", y = "KEGG pathways",
+       size = "Gene Count", color = "Adjusted p-value") +
+  scale_color_gradient(low = "red", high = "blue", name = "Adj. p-value") +  # Red = more significant
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10),
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"))
+
+# Save the plot to disk
+ggsave("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/DOWNggKEGG_dys_pathways.jpg", 
+       plot = p, width = 10, height = 8, dpi = 300)
+```
+
+-------------------------------------------- ENRICHMENT - REAC --------------------------------------------
+
+```{r}
+ereact_down_dys <- enrichPathway(
+  gene = down_dys_filtered_annotated$ENTREZID,
+  organism = "human",
+  pAdjustMethod = "BH",
+  qvalueCutoff = 0.05,
+  readable = TRUE,
+  minGSSize = 10,
+  maxGSSize = 1000
+) 
+
+tab_react_down_dys <- as.data.frame(ereact_down_dys@result)
+
+head(ereact_down_dys)
+
+```
+```{r}
+write.xlsx(tab_react_down_dys, file = "C:/Users/Usuario/Desktop/BACHELORS/Rdata/Data/dys/DOWN/react_down_dys.xlsx", rowNames = TRUE)
+```
+
+```{r}
+dotplot(ereact_down_dys, showCategory = 30)
+barplot(ereact_down_dys, showCategory = 30)
+```
+
+```{r}
+plot_data <- ereact_down_dys@result
+
+# Filter by adjusted p-value threshold
+plot_data <- plot_data[plot_data$p.adjust <= 0.05, ]
+
+# Convert GeneRatio from fraction (e.g., "5/200") to numeric (e.g., 0.025)
+plot_data$GeneRatio <- sapply(plot_data$GeneRatio, function(x) {
+  parts <- unlist(strsplit(x, "/"))
+  as.numeric(parts[1]) / as.numeric(parts[2])
+})
+
+# Order by GeneRatio (descending) and keep top 30 enriched terms
+plot_data <- plot_data[order(plot_data$GeneRatio, decreasing = TRUE), ]
+plot_data <- head(plot_data, 30)
+
+# Create dotplot
+p <- ggplot(plot_data, aes(x = GeneRatio, y = reorder(Description, GeneRatio),
+                           size = Count, color = p.adjust)) +
+  geom_point() +
+  labs(title = "Downregulated REAC terms Enrichment for Dysfunction",
+       x = "GeneRatio", y = "REAC terms",
+       size = "Gene Count", color = "Adjusted p-value") +
+  scale_color_gradient(low = "red", high = "blue", name = "Adj. p-value") +  # Red = more significant
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10),
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"))
+
+# Save the plot to disk
+ggsave("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/DOWNggREAC_dys_pathways.jpg", 
+       plot = p, width = 10, height = 8, dpi = 300)
+```
+
+-------------------------------------------- ENRICHMENT - TF --------------------------------------------
+```{r}
+dorothea_hs <- dorothea::dorothea_hs
+
+dorothea_tf <- dorothea_hs %>%
+  dplyr::filter(confidence %in% c("A", "B")) %>%
+  dplyr::select(tf, target) %>%
+  dplyr::distinct()
+
+etf_down_dys <- enricher(
+  gene = down_dys_filtered_annotated$GENENAME,
+  TERM2GENE = dorothea_tf,
+  pAdjustMethod = "BH",
+  qvalueCutoff = 0.05,
+  minGSSize = 10,
+  maxGSSize = 1000
+) 
+
+tab_tf_down_dys <- as.data.frame(etf_down_dys@result)
+
+head(etf_down_dys)
+```
+
+```{r}
+write.xlsx(tab_tf_down_dys, file = "C:/Users/Usuario/Desktop/BACHELORS/Rdata/Data/dys/DOWN/TF_down_dys.xlsx", rowNames = TRUE)
+```
+
+# Visualization
+```{r}
+dotplot(etf_down_dys, showCategory = 30)
+barplot(etf_down_dys, showCategory = 30)
+```
+
+# Dotplot
+```{r}
+plot_data <- etf_down_dys@result
+
+# Filter by adjusted p-value threshold
+plot_data <- plot_data[plot_data$p.adjust <= 0.05, ]
+
+# Convert GeneRatio from fraction (e.g., "5/200") to numeric (e.g., 0.025)
+plot_data$GeneRatio <- sapply(plot_data$GeneRatio, function(x) {
+  parts <- unlist(strsplit(x, "/"))
+  as.numeric(parts[1]) / as.numeric(parts[2])
+})
+
+# Order by GeneRatio (descending) and keep top 30 enriched terms
+plot_data <- plot_data[order(plot_data$GeneRatio, decreasing = TRUE), ]
+plot_data <- head(plot_data, 30)
+
+# Create dotplot
+p <- ggplot(plot_data, aes(x = GeneRatio, y = reorder(Description, GeneRatio),
+                           size = Count, color = p.adjust)) +
+  geom_point() +
+  labs(title = "Downregulated TF Enrichment for Dysfunction",
+       x = "GeneRatio", y = "TF",
+       size = "Gene Count", color = "Adjusted p-value") +
+  scale_color_gradient(low = "red", high = "blue", name = "Adj. p-value") +  # Red = more significant
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10),
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"))
+
+# Save the plot to disk
+ggsave("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/DOWNggTF_dys_pathways.jpg", 
+       plot = p, width = 10, height = 8, dpi = 300)
+```
+
+-------------------------------------------- ENRICHMENT - MSigDB --------------------------------------------
+```{r}
+hallmark_gmt <- read.gmt("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Databases/h.all.v2024.1.Hs.symbols.gmt")
+
+c8_gmt <- read.gmt("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Databases/c8.all.v2024.1.Hs.symbols.gmt")
+
+# Hallmark ORA
+edownhallmark_dys <- enricher(
+  gene = down_dys_filtered_annotated$GENENAME,
+  TERM2GENE = hallmark_gmt,
+  pAdjustMethod = "BH",
+  qvalueCutoff = 0.05,
+  minGSSize = 10,
+  maxGSSize = 1000
+)
+
+tab_hallmarks_down_dys <- as.data.frame(edownhallmark_dys@result)
+
+# Immunologic Signatures ORA
+edownmarkers_dys <- enricher(
+  gene = down_dys_filtered_annotated$GENENAME,
+  TERM2GENE = c8_gmt,
+  pAdjustMethod = "BH",
+  qvalueCutoff = 0.05,
+  minGSSize = 10,
+  maxGSSize = 1000
+)
+
+tab_markers_down_dys <- as.data.frame(edownmarkers_dys@result)
+
+head (edownhallmark_dys)
+head (edownmarkers_dys)
+```
+
+```{r}
+write.xlsx(tab_hallmarks_down_dys, file = "C:/Users/Usuario/Desktop/BACHELORS/Rdata/Data/dys/DOWN/HALLMARKS_down_dys.xlsx", rowNames = TRUE)
+```
+```{r}
+write.xlsx(tab_markers_down_dys, file = "C:/Users/Usuario/Desktop/BACHELORS/Rdata/Data/dys/DOWN/MARKERS_down_dys.xlsx", rowNames = TRUE)
+```
+
+# Visualization
+```{r}
+dotplot(edownhallmark_dys, showCategory = 30)
+dotplot(edownmarkers_dys, showCategory = 30)
+
+barplot(edownhallmark_dys, showCategory = 30)
+barplot(edownmarkers_dys, showCategory = 30)
+```
+
+#Dotplot
+```{r}
+plot_data <- edownhallmark_dys@result
+
+# Filter by adjusted p-value threshold
+plot_data <- plot_data[plot_data$p.adjust <= 0.05, ]
+
+# Convert GeneRatio from fraction (e.g., "5/200") to numeric (e.g., 0.025)
+plot_data$GeneRatio <- sapply(plot_data$GeneRatio, function(x) {
+  parts <- unlist(strsplit(x, "/"))
+  as.numeric(parts[1]) / as.numeric(parts[2])
+})
+
+# Order by GeneRatio (descending) and keep top 30 enriched terms
+plot_data <- plot_data[order(plot_data$GeneRatio, decreasing = TRUE), ]
+plot_data <- head(plot_data, 30)
+
+# Create dotplot
+p <- ggplot(plot_data, aes(x = GeneRatio, y = reorder(Description, GeneRatio),
+                           size = Count, color = p.adjust)) +
+  geom_point() +
+  labs(title = "Downregulated Hallmark Enrichment for Dysfunction",
+       x = "GeneRatio", y = "Hallmark",
+       size = "Gene Count", color = "Adjusted p-value") +
+  scale_color_gradient(low = "red", high = "blue", name = "Adj. p-value") +  # Red = more significant
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10),
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"))
+
+# Save the plot to disk
+ggsave("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/DOWNggHALLMARK_dys_pathways.jpg", 
+       plot = p, width = 10, height = 8, dpi = 300)
+
+plot_data <- edownmarkers_dys@result
+
+# Filter by adjusted p-value threshold
+plot_data <- plot_data[plot_data$p.adjust <= 0.05, ]
+
+# Convert GeneRatio from fraction (e.g., "5/200") to numeric (e.g., 0.025)
+plot_data$GeneRatio <- sapply(plot_data$GeneRatio, function(x) {
+  parts <- unlist(strsplit(x, "/"))
+  as.numeric(parts[1]) / as.numeric(parts[2])
+})
+
+# Order by GeneRatio (descending) and keep top 30 enriched terms
+plot_data <- plot_data[order(plot_data$GeneRatio, decreasing = TRUE), ]
+plot_data <- head(plot_data, 30)
+
+# Create dotplot
+p <- ggplot(plot_data, aes(x = GeneRatio, y = reorder(Description, GeneRatio),
+                           size = Count, color = p.adjust)) +
+  geom_point() +
+  labs(title = "Downregulated Marker Enrichment for Dysfunction",
+       x = "GeneRatio", y = "Marker",
+       size = "Gene Count", color = "Adjusted p-value") +
+  scale_color_gradient(low = "red", high = "blue", name = "Adj. p-value") +  # Red = more significant
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10),
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"))
+
+# Save the plot to disk
+ggsave("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/DOWNggMARKERS_dys_pathways.jpg", 
+       plot = p, width = 10, height = 8, dpi = 300)
+```
+
+-------------------------------------------- ORA results --------------------------------------------
+```{r}
+tab_go_down_dys$Source <- "GO"
+tab_kegg_down_dys$Source <- "KEGG"
+tab_react_down_dys$Source <- "reactome"
+tab_tf_down_dys$Source <- "TF"
+tab_hallmarks_down_dys$Source <- "MSigDB"
+
+pval_cutoff <-  1e-5
+GeneRatiomin <- 0.1
+
+down_dys_enrich <- bind_rows(
+  tab_go_down_dys,
+  tab_kegg_down_dys,
+  tab_react_down_dys,
+  tab_tf_down_dys,
+  tab_hallmarks_down_dys,
+)
+# Convert GeneRatio from fraction (e.g., "5/200") to numeric (e.g., 0.025)
+down_dys_enrich$GeneRatio <- sapply(down_dys_enrich$GeneRatio, function(x) {
+  parts <- unlist(strsplit(x, "/"))
+  as.numeric(parts[1]) / as.numeric(parts[2])
+})
+
+down_dys_enrich_filtered <- down_dys_enrich %>%
+  dplyr::filter(
+    p.adjust <= pval_cutoff,
+    GeneRatio >= GeneRatiomin,
+    Count >= 3
+  ) %>%
+  arrange(desc(GeneRatio))
+
+top_pathways <- down_dys_enrich_filtered %>% head(20)
+
+library(writexl)
+write_xlsx(down_dys_enrich_filtered, "C:/Users/Usuario/Desktop/BACHELORS/Rdata/Data/down_dys_enrich_filtered.xlsx")
+
+convert_to_Factors <- function(df) {
+  for (col in colnames(df)) {
+    if (is.character(df[[col]])) {
+      df[[col]] <- as.factor(df[[col]])
+    }
+  }
+  return(df)
+}
+
+fact.down_dys_enrich_filtered <- convert_to_Factors(down_dys_enrich_filtered)
+
+head(down_dys_enrich_filtered)
+
+summary(fact.down_dys_enrich_filtered)
+```
+
+## Pathway to gene table
+```{r}
+df <- down_dys_enrich_filtered
+
+gene_list <- strsplit(df$geneID, split = "/")
+
+max_genes <- max(sapply(gene_list, length))
+
+gene_matrix <- t(sapply(gene_list, function(x) {
+  length(x) <- max_genes
+  return(x)
+}))
+
+gene_df <- as.data.frame(gene_matrix, stringsAsFactors = FALSE)
+colnames(gene_df) <- paste0("Gene_", seq_len(max_genes))
+
+pathway_down_dys <- cbind(Pathway_ID = df$ID, gene_df)
+rownames(pathway_down_dys) <- df$Description
+
+head(pathway_down_dys)
+
+library(openxlsx)
+
+write.xlsx(pathway_down_dys, file = "C:/Users/Usuario/Desktop/BACHELORS/Rdata/pathwaytogene_down_dys.xlsx", rowNames = TRUE)
+```
+
+# Gene Matrix
+
+```{r}
+pathway_gene_symbols <- data.frame(Pathway = character(), GeneSymbols = character(), stringsAsFactors = FALSE)
+
+for (i in 1:nrow(down_dys_enrich_filtered)) {
+  pathway_description <- down_dys_enrich_filtered$Description[i]
+
+  gene_symbols <- unlist(strsplit(down_dys_enrich_filtered$geneID[i], "/"))
+  gene_symbols <- gene_symbols[!is.na(gene_symbols) & gene_symbols != ""]
+  gene_symbols_str <- paste(gene_symbols, collapse = ", ")
+
+  pathway_gene_symbols <- rbind(pathway_gene_symbols, data.frame(Pathway = pathway_description, GeneSymbols = gene_symbols_str, stringsAsFactors = FALSE))
+}
+
+print(pathway_gene_symbols)
+
+unique_genes <- unique(unlist(strsplit(paste(pathway_gene_symbols$GeneSymbols, collapse = ","), ", ")))
+
+gene_matrix <- matrix(0, nrow = length(pathway_gene_symbols$Pathway), ncol = length(unique_genes))
+
+rownames(gene_matrix) <- pathway_gene_symbols$Pathway
+colnames(gene_matrix) <- unique_genes
+
+for (i in 1:nrow(gene_matrix)) {
+  genes <- unlist(strsplit(pathway_gene_symbols$GeneSymbols[i], ", "))
+  valid_genes <- genes[genes %in% colnames(gene_matrix)]
+  gene_matrix[i, valid_genes] <- 1
+}
+
+print(gene_matrix)
+
+library(openxlsx)
+write.xlsx(gene_matrix, file = ("C:/Users/Usuario/Desktop/BACHELORS/Rdata/genematrix_down_dys.xlsx"), rowNames = TRUE)
+```
+
+## MIXED
+
+```{r}
+# Add direction labels
+down_dys_enrich_filtered$Direction <- "Down"
+up_dys_enrich_filtered$Direction <- "Up"
+
+# Combine datasets
+combined_enrich_dys <- rbind(down_dys_enrich_filtered, up_dys_enrich_filtered)
+
+```
+
+
+### Mixed dotplot
+```{r}
+# Convert GeneRatio if it's a frdysion string
+combined_enrich_dys$GeneRatio <- sapply(combined_enrich_dys$GeneRatio, function(x) {
+  eval(parse(text = x))
+})
+```
+
+```{r}
+# Select top 30 by p.adjust for each direction
+top_enrich <- combined_enrich_dys %>%
+  group_by(Direction) %>%
+  arrange(p.adjust) %>%
+  slice_head(n = 30) %>%
+  ungroup()
+
+# Up Pathways Plot
+up_plot <- ggplot(top_enrich %>% dplyr::filter(Direction == "Up"), aes(x = GeneRatio, y = fct_reorder(Description, GeneRatio))) +
+  geom_segment(aes(xend = 0, yend = Description), color = "grey") +
+  geom_point(aes(color = p.adjust, size = Count)) +
+  scale_color_gradientn(
+    colours = c("#f7ca64", "#46bac2", "#7e62a3"),
+    trans = "log10",
+    guide = guide_colorbar(reverse = TRUE, order = 1)
+  ) +
+  scale_size_continuous(range = c(2, 10)) +
+  labs(
+    x = "Gene Ratio",
+    y = "Enriched Term",
+    color = "Adjusted p-value",
+    size = "Gene Count",
+    title = "Dot Plot of Upregulated in dysivation Enrichment Analysis"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.y = element_text(size = 10),
+    plot.title = element_text(hjust = 0.5),
+    legend.position = "right"
+  )
+
+
+# Down Pathways Plot
+down_plot <- ggplot(top_enrich %>% dplyr::filter(Direction == "Down"), aes(x = GeneRatio, y = fct_reorder(Description, GeneRatio))) +
+  geom_segment(aes(xend = 0, yend = Description), color = "grey") +
+  geom_point(aes(color = p.adjust, size = Count)) +
+  scale_color_gradientn(
+    colours = c("#f7ca64", "#46bac2", "#7e62a3"),
+    trans = "log10",
+    guide = guide_colorbar(reverse = TRUE, order = 1)
+  ) +
+  scale_size_continuous(range = c(2, 10)) +
+  labs(
+    x = "Gene Ratio",
+    y = "Enriched Term",
+    color = "Adjusted p-value",
+    size = "Gene Count",
+    title = "Dot Plot of Downregulated in dysivation Enrichment Analysis"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.y = element_text(size = 10),
+    plot.title = element_text(hjust = 0.5),
+    legend.position = "right"
+  )
+
+# Save the plots separately
+ggsave("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/Up_dys_enrichment.jpg", 
+       plot = up_plot, width = 12, height = 8, dpi = 300)
+
+ggsave("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/Down_dys_enrichment.jpg", 
+       plot = down_plot, width = 12, height = 8, dpi = 300)
+
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(forcats)
+
+# Plot
+p <- ggplot(top_enrich, aes(x = GeneRatio, y = fct_reorder(Description, GeneRatio))) +
+  geom_segment(aes(xend = 0, yend = Description), color = "grey") +
+  geom_point(aes(color = p.adjust, size = Count)) +
+  scale_color_gradientn(
+    colours = c("#f7ca64", "#46bac2", "#7e62a3"),
+    trans = "log10",
+    guide = guide_colorbar(reverse = TRUE, order = 1)
+  ) +
+  scale_size_continuous(range = c(2, 10)) +
+  labs(
+    x = "Gene Ratio",
+    y = "Enriched Term",
+    color = "Adjusted p-value",
+    size = "Gene Count",
+    title = "Dot Plot of dysivation Enrichment Analysis"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.y = element_text(size = 10),
+    plot.title = element_text(hjust = 0.5),
+    legend.position = "right"
+  )
+
+# Save the plot
+ggsave("C:/Users/Usuario/Desktop/BACHELORS/Rdata/Plots/dys_enrichment_clusterProfiler_style.jpg",
+       plot = p, width = 10, height = 8, dpi = 300)
+
+```
+
+### CordDiagram
+
+```{r}
+# Step 1: Get top 5 upregulated and top 5 downregulated pathways
+top_pathways <- combined_enrich_dys %>%
+  group_by(Direction) %>%
+  arrange(p.adjust) %>%
+  slice_head(n = 5) %>%
+  ungroup()
+
+# Step 2: Create pathway-gene mapping
+pathway_gene_symbols <- data.frame(Pathway = character(), GeneSymbols = character(), stringsAsFactors = FALSE)
+
+gene_log2FC_df <- bind_rows(up_dys_filtered_annotated, down_dys_filtered_annotated)
+gene_log2FC <- gene_log2FC_df$log2FoldChange
+names(gene_log2FC) <- gene_log2FC_df$GENENAME
+names(gene_log2FC) <- toupper(trimws(names(gene_log2FC)))
+
+for (i in 1:nrow(top_pathways)) {
+  pathway_description <- top_pathways$Description[i]
+  
+# If geneID uses "/" as the separator:
+gene_symbols <- unlist(strsplit(top_pathways$geneID[i], "/"))
+gene_symbols <- toupper(trimws(gene_symbols))
+gene_symbols <- gene_symbols[gene_symbols != ""]
+
+ # Limit to 20 genes per pathway, prioritizing by |log2FC|
+  gene_fc <- gene_log2FC[gene_symbols]
+  gene_symbols <- gene_symbols[order(-abs(gene_fc), na.last = NA)]
+  gene_symbols <- head(gene_symbols, 20)
+
+gene_symbols_str <- paste(gene_symbols, collapse = ", ")
+  
+  pathway_gene_symbols <- rbind(pathway_gene_symbols, data.frame(
+    Pathway = pathway_description,
+    GeneSymbols = gene_symbols_str,
+    stringsAsFactors = FALSE
+  ))
+}
+
+# Step 3: Generate unique gene symbol vector
+unique_genes <- unique(unlist(strsplit(paste(pathway_gene_symbols$GeneSymbols, collapse = ","), ", ")))
+unique_genes <- toupper(trimws(unique_genes))
+
+# Step 4: Create gene matrix (pathways x gene symbols)
+gene_matrix <- matrix(0, nrow = length(pathway_gene_symbols$Pathway), ncol = length(unique_genes))
+rownames(gene_matrix) <- pathway_gene_symbols$Pathway
+colnames(gene_matrix) <- unique_genes
+
+# Step 5: Fill matrix with 1s where a gene is associated with a pathway
+for (i in 1:nrow(gene_matrix)) {
+  genes <- unlist(strsplit(pathway_gene_symbols$GeneSymbols[i], ", "))
+  valid_genes <- genes[genes %in% colnames(gene_matrix)]
+  gene_matrix[i, valid_genes] <- 1
+}
+```
+
+```{r}
+names(gene_log2FC) <- gene_log2FC_df$GENENAME
+names(gene_log2FC) <- toupper(trimws(names(gene_log2FC)))
+
+matching_genes <- intersect(colnames(gene_matrix), names(gene_log2FC))
+gene_matrix <- gene_matrix[, matching_genes, drop = FALSE]
+```
+
+```{r}
+library(circlize)
+library(ComplexHeatmap)
+library(grid)
+
+# Define the color function
+# Color function: blue (down), white (neutral), red (up)
+lfc_range <- range(gene_log2FC, na.rm = TRUE)
+col_fun <- colorRamp2(
+  breaks = c(min(-5), 0, max(5)),
+  colors = c("blue", "white", "red")
+)
+
+# Assign colors to genes based on log2FC
+gene_colors <- setNames(col_fun(gene_log2FC), names(gene_log2FC))
+
+# Step 1: Chord Diagram Plot
+# Adjust circos settings
+circos.par(gap.degree = 1, # Slightly increase gap between sectors
+           start.degree = 90, # Position the first sector at the top
+           cell.padding = c(0, 0, 0, 0))  # Tighten the padding around cells
+
+# 1. Saturated candy color palette for pathways
+pathway_names <- rownames(gene_matrix)
+pathway_colors <- setNames(rep(c(
+  "#FF4C65",  # vibrant pink-red
+  "#00BFC4",  # teal cyan
+  "#FFA500",  # orange
+  "#7CAE00",  # lime green
+  "#C77CFF",  # lavender purple
+  "#00BA38",  # vibrant green
+  "#619CFF",  # blue
+  "#36013F",  # deep purple
+  "#FF61C3",  # pink
+  "#8491B4"   # steel blue
+), length.out = length(pathway_names)), pathway_names)
+
+# 2. Merge all grid colors
+grid_colors <- c(gene_colors, pathway_colors)
+
+# 3. Draw chord diagram and save it to PNG
+png("C:/Users/Usuario/Desktop/chord_diagram_plot.png", width = 800, height = 800)
+chordDiagram(
+  gene_matrix,
+  annotationTrack = "grid",
+  preAllocateTracks = list(track.height = 0.05),
+  grid.col = grid_colors,
+  transparency = 0.4,
+  directional = 1,
+  direction.type = "arrows",
+  link.arr.type = "big.arrow",
+)
+
+# 5. Add labels only to genes with clockwise positioning (smaller labels)
+circos.trackPlotRegion(track.index = 2, panel.fun = function(x, y) {
+  sector.name <- get.cell.meta.data("sector.index")
+  if (sector.name %in% names(gene_log2FC)) {
+    xlim <- get.cell.meta.data("xlim")
+    ylim <- get.cell.meta.data("ylim")
+    # Print labels clockwise with smaller text
+    circos.text(mean(xlim), ylim[1] + 2.5, sector.name, 
+                facing = "clockwise", niceFacing = TRUE, adj = c(0, 0.5), cex = 0.8)  # Reduced cex for smaller labels
+  }
+}, bg.border = NA)
+dev.off()
+
+# Step 2: Pathway Legend (smaller and placed top-right)
+pathway_legend <- Legend(
+  labels = names(pathway_colors), 
+  legend_gp = gpar(fill = pathway_colors),
+  title = "Pathways",
+  title_gp = gpar(fontface = "bold"),
+  labels_gp = gpar(fontsize = 10),
+  ncol = 1,  # Stack vertically
+  gap = unit(4, "pt"),
+  grid_height = unit(8, "mm"),
+  grid_width = unit(8, "mm")
+)
+
+# Save as image (increased width and height to avoid clipping)
+png("pathway_legend.png", width = 1000, height = 800, res = 120)
+grid.newpage()
+draw(pathway_legend, x = unit(0.1, "npc"), y = unit(0.9, "npc"), just = c("left", "top"))
+dev.off()
+
+# Create the updated Log2FC legend
+log2fc_legend <- Legend(
+  col_fun = col_fun,
+  title = "log2 Fold Change",
+  title_gp = gpar(fontface = "bold"),
+  labels_gp = gpar(fontsize = 10),
+  direction = "horizontal",
+  legend_width = unit(5, "cm")
+)
+
+# Save Log2FC legend to file
+png("log2fc_legend.png", width = 500, height = 150, res = 120)
+grid.newpage()
+draw(log2fc_legend, x = unit(0.5, "npc"), y = unit(0.5, "npc"), just = "center")
+dev.off()
+```
+
+### Enrichment map
+
+```{r}
+# Load necessary libraries
+library(DOSE)
+library(enrichplot)
+library(cowplot)
+
+# Prepare the data for each enrichment result (KEGG, GO, reactOME, Dorothea)
+# Assuming you already have enrichment results for these (replace 'ekegg_up_dys', etc.)
+
+# KEGG Enrichment
+ekegg_up_dys@result$regulation <- "up"
+ekegg_down_dys@result$regulation <- "down"
+ekegg_dys_combined <- ekegg_up_dys
+ekegg_dys_combined@result <- rbind(ekegg_up_dys@result, ekegg_down_dys@result)
+ekegg_dys_combined@result <- ekegg_dys_combined@result[ekegg_dys_combined@result$p.adjust < 0.05, ]
+ekegg_dys_combined@result <- ekegg_dys_combined@result[order(ekegg_dys_combined@result$GeneRatio, decreasing = TRUE), ]
+ekegg_term_sim_matrix <- pairwise_termsim(ekegg_dys_combined)
+
+# GO Enrichment 
+ego_up_dys@result$regulation <- "up"
+ego_down_dys@result$regulation <- "down"
+ego_dys_combined <- ego_up_dys
+ego_dys_combined@result <- rbind(ego_up_dys@result, ego_down_dys@result)
+ego_dys_combined@result <- ego_dys_combined@result[ego_dys_combined@result$p.adjust < 0.05, ]
+ego_dys_combined@result <- ego_dys_combined@result[order(ego_dys_combined@result$GeneRatio, decreasing = TRUE), ]
+ego_term_sim_matrix <- pairwise_termsim(ego_dys_combined)
+
+# reactOME Enrichment 
+ereact_up_dys@result$regulation <- "up"
+ereact_down_dys@result$regulation <- "down"
+ereact_dys_combined <- ereact_up_dys
+ereact_dys_combined@result <- rbind(ereact_up_dys@result, ereact_down_dys@result)
+ereact_dys_combined@result <- ereact_dys_combined@result[ereact_dys_combined@result$p.adjust < 0.05, ]
+ereact_dys_combined@result <- ereact_dys_combined@result[order(ereact_dys_combined@result$GeneRatio, decreasing = TRUE), ]
+ereact_term_sim_matrix <- pairwise_termsim(ereact_dys_combined)
+
+# Create EnrichMap plots for each enrichment type
+set.seed(123)
+
+# KEGG EnrichMap
+emap_kegg <- emapplot(ekegg_term_sim_matrix, layout = "kk", 
+                       node_label = "category", 
+                      nCluster = 2, color = "p.adjust")
+set.seed(123)
+
+# GO EnrichMap
+emap_go <- emapplot(ego_term_sim_matrix, layout = "kk", 
+                     node_label = "category", 
+                    nCluster = 3, color = "p.adjust") 
+set.seed(123)
+
+# reactOME EnrichMap
+emap_reactome <- emapplot(ereact_term_sim_matrix, layout = "kk", 
+                           node_label = "category", 
+                           nCluster = 4, color = "p.adjust") 
+
+# Combine the plots using cowplot
+combined_plot <- plot_grid(emap_kegg, emap_go, emap_reactome, 
+                           labels = c("A", "B", "C"), 
+                           ncol = 1, 
+                           align = "v") 
+
+# Save the grid of the three plots
+ggsave("emapplot_dys.jpg", plot = cowplot::plot_grid(emap_kegg, emap_go, emap_reactome, ncol=3, labels=LETTERS[1:3]), 
+       width = 28, height =10, dpi = 300)  # Adjust the dimensions as needed for the output size.
+```
