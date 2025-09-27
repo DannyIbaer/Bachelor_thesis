@@ -1,0 +1,872 @@
+---
+title: "GEO query and FASTQ download"
+author: "Daniel Bernad Ibáñez"
+date: "2025-03-18"
+output: html_document
+---
+
+Outputs: 
+ - GSE metadata files 
+ - FASTQ files for each SRR accession
+
+ Ensure you have the following R libraries installed: rentrez, tidyverse, and data.table
+ You can install them using: install.packages(c("rentrez", "tidyverse", "data.table"))
+
+ Ensure SRA Toolkit is installed for fasterq-dump functionality
+ If not, install from: https://github.com/ncbi/sra-tools/wiki/01.-Downloading-SRA-Toolkit
+ After installation, make sure 'fastq-dump' is accessible from your terminal
+ 
+ Ensure the working directory is set correctly for saving files
+ Use setwd("/your/desired/path") if needed
+
+If you encounter errors:
+ - Check your internet connection
+ - Verify API key and SRA Toolkit installation
+ - Ensure NCBI servers are reachable
+ 
+## LIBRARIES
+```{r}
+# Install BiocManager if not already installed
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+if (!requireNamespace("SRAdb", quietly = TRUE)) BiocManager::install("SRAdb")
+if (!requireNamespace("Rsamtools", quietly = TRUE)) BiocManager::install("Rsamtools")
+if (!requireNamespace("GenomicAlignments", quietly = TRUE)) BiocManager::install("GenomicAlignments")
+
+if (!requireNamespace("GEOquery", quietly = TRUE)) install.packages("GEOquery")
+if (!requireNamespace("rentrez", quietly = TRUE)) install.packages("rentrez")
+if (!requireNamespace("dplyr", quietly = TRUE)) install.packages("dplyr")
+if (!requireNamespace("httr", quietly = TRUE)) install.packages("httr")
+if (!requireNamespace("jsonlite", quietly = TRUE)) install.packages("jsonlite")
+if (!requireNamespace("glue", quietly = TRUE)) install.packages("glue")
+if (!requireNamespace("purrr", quietly = TRUE)) install.packages("purrr")
+if (!requireNamespace("snakecase", quietly = TRUE)) install.packages("snakecase")
+if (!requireNamespace("Cml2", quietly = TRUE)) install.packages("Cml2")
+if (!requireNamespace("writexl", quietly = TRUE)) install.packages("writexl")
+if (!requireNamespace("utils", quietly = TRUE)) {install.packages("utils")}
+
+library(httr)
+library(jsonlite)
+library(rentrez)
+library(GEOquery)
+library(dplyr)
+library(glue)
+library(purrr)
+library(snakecase)
+library(tidyr)
+library(xml2)
+library(writexl)
+```
+
+## GEO Datasets SEARCH
+
+Required: Email and Entrez API key
+          Advanced query - can be built on GEO Datasets
+
+Replace with your own NCBI API key
+Get one here: https://www.ncbi.nlm.nih.gov/account/settings/
+Using an API key increases your request rate limit
+          
+
+```{r}
+# Set up your email for Entrez
+entrez_email <- "danielbernad13@gmail.com" # Replace with your email
+api_key <- "5db93891ce442ed20e10124e288848abd108"# Replace with your NCBI API key
+set_entrez_key(api_key)
+
+# Check if the API key is set before proceeding
+if (is.null(api_key) || api_key == "api_key") {
+  stop("You must set your NCBI API key. Please replace the placeholder with your key.")
+}
+
+# Function: Search all related GSE IDs
+search_GEO_paginated <- function(query, total_hits) {
+  gse_ids <- c()  # To store all the IDs
+  retmax <- 20    # Number of results per page (modifiable)
+
+  # Paginate from 0 to total results in steps of 'retmax'
+  for (start in seq(0, total_hits, by = retmax)) {
+    # Query the API with pagination
+    search_results <- entrez_search(db="gds", term=query, retstart=start, retmax=retmax)
+
+    # Save the obtained IDs
+    gse_ids <- c(gse_ids, paste0(search_results$ids))
+  }
+
+  return(gse_ids)
+}
+
+# Fetch the total number of hits dynamically
+fetch_total_hits <- function(query) {
+  # Perform a search to get the count of results
+  search_result <- entrez_search(db="gds", term=query, retmax=1)
+  
+  # Return the total count of hits
+  return(search_result$count)
+}
+
+# Query for searching GSE IDs
+query <- '("RNA-seq"[Platform Technology] OR "RNA sequencing"[Platform Technology]) AND "Homo sapiens"[Organism] AND ("HUVEC"[Cell Type] OR "Human Umbilical Vein Endothelial Cells"[Cell Type]) AND ("TNF-alpha"[Treatment] OR "IL-6"[Treatment] OR "IL-1B"[Treatment] OR "hypoxia"[Treatment])'  # Replace with your actual query
+
+# Fetch the total number of hits dynamically
+total_hits <- fetch_total_hits(query)
+
+# Ensure there are results
+if (total_hits == 0) {
+  stop("No results found for the query: ", query)
+}
+
+# Use function: Get the list of GSE IDs
+  # Use the function to fetch all results
+gse_ids <- search_GEO_paginated( query, total_hits)
+
+print(gse_ids)  # Display all obtained IDs
+```
+
+## From GEO IDs to GEO accession numbers:
+```{r}
+# Function to get the accession number from the UID
+get_accession_from_uid <- function(uid) {
+  # Base URL for the NCBI esummary API
+  base_url <- "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+
+  # Query parameters
+  params <- list(
+    db = "gds",           # GEO datasets database
+    id = uid,             # Provided UID
+    retmode = "json"      # JSON response format
+  )
+
+  # Make GET request to the API
+  response <- GET(base_url, query = params)
+
+  # Check if request was successful
+  if (status_code(response) == 200) {
+    # Parse the JSON response
+    data <- fromJSON(httr::content(response, type = "text", encoding = "UTF-8"))
+
+    # Extract the accession from the result
+    if (!is.null(data$result[[as.character(uid)]])) {
+      accession <- data$result[[as.character(uid)]]$accession
+      return(accession)
+    } else {
+      message("UID not found in response.")
+      return(NULL)
+    }
+  } else {
+    message("Request failed, status code: ", status_code(response))
+    return(NULL)
+  }
+}
+
+# List to store accession numbers and failed UIDs
+accession_numbers <- list()    # List of obtained accessions
+failed_ids <- c()              # Vector to store failed UIDs
+
+# Loop over each UID in gse_ids
+for (uid in gse_ids) {
+  # Get the accession for the current UID
+  delay = 1
+  Sys.sleep(delay)  # Pause to avoid server overload
+  accession <- get_accession_from_uid(uid)
+
+  if (!is.null(accession)) {
+    # Save the accession if obtained
+    accession_numbers[[uid]] <- accession
+  } else {
+    # Add failed UID to list
+    failed_ids <- c(failed_ids, uid)
+  }
+
+  # Progress message
+  message("Processing completed for UID: ", uid)
+}
+
+accession_vector <- unname(unlist(accession_numbers))
+
+# Show obtained accession numbers
+print("Obtained accession numbers:")
+print(accession_vector)
+
+# Show failed UIDs
+if (length(failed_ids) > 0) {
+  message("Could not obtain accession numbers for the following UIDs:")
+  print(failed_ids)
+} else {
+  message("Accession numbers obtained for all UIDs.")
+}
+```
+
+## Get Excel with all samples belonging to search hits and part of the metadata   
+
+REMEMBER TO SET NAME FOR THE CREATED FILE
+
+FILE IS CREATED ON YOUR WORKING DIRECTORY
+```{r}
+# View the result
+print(accession_vector)
+
+# List of GEO accession numbers to loop through
+geo_accessions <- accession_vector # Add more GEO accessions as needed
+
+# Create an empty list to store data frames
+all_data <- list()
+
+# Loop through the list of accession numbers
+for (accession in accession_vector) {
+  # Wrap the code in tryCatch for error handling
+  result <- tryCatch({
+    delay = 1
+    Sys.sleep(delay)  # Pause to avoid server overload
+    # Set the current study (GEO accession number)
+    kStudy <- accession
+    
+    # Query NCBI GEO for information about Series
+    series <- entrez_search("gds",
+                            term = glue("{kStudy}[ACCN] AND gse[ETYP]"))
+    
+    # Use the ID to fetch details, including the sample table
+    series_summary <- entrez_summary(db = "gds", id = series$ids)
+    
+    # Fetch sample annotations as XML records
+    sample_ids <- extract_from_esummary(series_summary, "samples")
+    sample_accessions <- entrez_search("biosample",
+                                       term = glue_collapse(
+                                         glue("{sample_ids$accession}"), sep = " OR "),
+                                       retmax = 1000L)
+    
+    # Query biosample database for details on each sample
+    records <- xml2::read_xml(
+      entrez_fetch("biosample", id = sample_accessions$ids, rettype = "xml")
+    )
+    
+    # Extract attributes for each sample
+    samples <- xml2::xml_find_all(records, "//BioSampleSet/BioSample")
+    
+    # Create the data frame from the XML data
+    df <- purrr::map_df(samples, function(x) {
+      data.frame(
+        accession = xml_attr(x, "accession"),
+        title = xml_text(xml2::xml_find_all(x, "Description/Title")),
+        biosample = xml_text(xml2::xml_find_all(x, "Ids/Id[@db = 'BioSample']")),
+        geo = xml_text(xml2::xml_find_all(x, "Ids/Id[@db = 'GEO']")),
+        organism = xml_attr(xml2::xml_find_all(x, "Description/Organism"),
+                            "taxonomy_name"),
+        tags = purrr::map_chr(
+          xml_attrs(xml2::xml_find_all(x, "Attributes/Attribute")),
+          "attribute_name"),
+        values = xml2::xml_text(
+          xml2::xml_find_all(x, "Attributes/Attribute")
+        )
+      )
+    })
+    
+    # Pivot into a wide data.frame
+    df <- tidyr::pivot_wider(
+      df,
+      id_cols = c("accession", "biosample", "geo", "title", "organism"),
+      names_from = "tags",
+      values_from = "values")
+    
+    # Convert column names to snake_case
+    colnames(df) <- snakecase::to_snake_case(colnames(df))
+    
+    # **THIS IS THE MUTATE LINE THAT ENSURES CONSISTENT DATA TYPES**
+    # Ensure that list columns are converted to character
+    df <- df %>%
+      mutate(across(where(is.list), ~as.character(.)))  # <--- MUTATE LINE
+    
+    # Add the data frame to the list
+    all_data[[kStudy]] <- df
+    
+    # Print a success message for this accession
+    print(glue("Successfully processed {kStudy}"))
+    
+  }, error = function(e) {
+    # Catch any errors and print an error message
+    print(glue("Error processing {accession}: {e$message}"))
+  })
+}
+
+library(writexl)
+
+# Combine all data frames in the list into one large data frame
+if (length(all_data) > 0) {
+  combined_df <- bind_rows(all_data, .id = "study_id")
+  
+  # Save the combined data frame to a single Excel file
+  output_filename <- "Activation_v2.xlsx"
+  write_xlsx(combined_df, output_filename)
+  
+  # Print a message indicating the combined file has been saved
+  print(glue("Saved combined file to {output_filename}"))
+} else {
+  print("No data was processed successfully.")
+}
+```
+
+## GSM TO SRR Run
+
+GSM are obtained by selecting which samples to use from the excels previously downloaded. 
+```{r}
+search_sra <- function(gsm) {
+  tryCatch({
+    query_term <- paste0('"', gsm, '"')  # Create exact search term
+    message("Searching for: ", query_term)
+    sra_search <- entrez_search(db = "sra", term = query_term)
+    
+    Sys.sleep(1)  # Adding a 1-second delay between requests
+    
+    if (length(sra_search$ids) > 0) {
+      return(sra_search$ids)
+    } else {
+      message("No SRA found for GSM: ", gsm)
+      return(NULL)
+    }
+  }, error = function(e) {
+    message("Error searching for GSM ", gsm, ": ", e$message)
+    return(NULL)
+  })
+}
+
+
+get_srr_accessions <- function(gsm_ids) {
+  srr_list <- list()  # List to store SRR data
+  failed_gsms <- list()  # List to store failed GSMs with reasons
+  
+  # Loop through GSM IDs to retrieve SRR
+  for (gsm in gsm_ids) {
+    message("Fetching SRA id for GSM: ", gsm)
+    
+    # Search for SRR
+    sra_search_results <- search_sra(gsm)
+    
+    if (!is.null(sra_search_results)) {
+      # Store results if found
+      srr_list[[length(srr_list) + 1]] <- data.frame(GSM = gsm, SRA = sra_search_results, stringsAsFactors = FALSE)
+    } else {
+      # If search failed or no results found, store the GSM and the failure reason
+      failed_gsms[[length(failed_gsms) + 1]] <- list(GSM = gsm, Reason = "No SRA found or error occurred")
+    }
+  }
+  
+  # Combine results into a data frame after the loop finishes
+  if (length(srr_list) > 0) {
+    result_df <- do.call(rbind, srr_list)
+  } else {
+    result_df <- NULL
+  }
+  
+  # Report failed GSMs with their reasons
+  if (length(failed_gsms) > 0) {
+    message("The following GSMs failed to retrieve SRA id:")
+    for (failure in failed_gsms) {
+      message("GSM: ", failure$GSM, " - Reason: ", failure$Reason)
+    }
+  }
+  
+  return(result_df)
+}
+
+# Example usage: Use your 'accession_vector' variable
+gsm = c(
+  "GSM7882294", "GSM7882295", "GSM7882296", "GSM7882297", "GSM7882298", "GSM7882299",
+  "GSM7634546", "GSM7634547", "GSM7634547", "GSM7634549", "GSM7634550", "GSM7634551",
+  "GSM8255379", "GSM8255380", "GSM8281734", "GSM8281735", "GSM8281736", "GSM8281737",
+  "GSM8281738", "GSM8281739", "GSM8281740", "GSM8281741", "GSM8281742", "GSM7899166",
+  "GSM7899167", "GSM7899168", "GSM7899172", "GSM7899173", "GSM7899174", "GSM7156892",
+  "GSM7156893", "GSM7156894", "GSM7156895", "GSM7156896", "GSM7156897", "GSM7316266",
+  "GSM7316267", "GSM7042319", "GSM7042320", "GSM7042321", "GSM7042322", "GSM7042323",
+  "GSM7042324", "GSM7042325", "GSM7042326", "GSM6674181", "GSM6674182", "GSM6674183",
+  "GSM6674184", "GSM6674185", "GSM6674186", "GSM6235387", "GSM6235388", "GSM6235389",
+  "GSM6235390", "GSM6235391", "GSM6235392", "GSM6586008", "GSM6586009", "GSM5273455",
+  "GSM5273456", "GSM5273457", "GSM5273458", "GSM4729224", "GSM4729225", "GSM4729228",
+  "GSM4729229", "GSM3446029", "GSM3446031", "GSM8707383", "GSM8707384", "GSM8707385",
+  "GSM8707386", "GSM8707387", "GSM8707388", "GSM8150781", "GSM8150782", "GSM8150783",
+  "GSM8150784", "GSM5643363", "GSM5643364", "GSM5643365", "GSM8272388", "GSM8272389",
+  "GSM7286421", "GSM7286422", "GSM7286423", "GSM7286424", "GSM7286425", "GSM7286426",
+  "GSM7731057", "GSM7731058", "GSM7731059", "GSM7731060", "GSM7731061", "GSM7731062",
+  "GSM5032901", "GSM5032901", "GSM5032901", "GSM6195499", "GSM6195500", "GSM6195501",
+  "GSM6195502", "GSM5591757", "GSM5591758", "GSM5591761", "GSM5591762", "GSM4714702",
+  "GSM4714703", "GSM4714704", "GSM7035959", "GSM7035960", "GSM7035961", "GSM7035962",
+  "GSM7035963", "GSM7035964", "GSM5848508", "GSM5848509", "GSM5848510", "GSM4848250",
+  "GSM4848251", "GSM3348151", "GSM3348152", "GSM3348153", "GSM3348154", "GSM3348155",
+  "GSM3348156", "GSM3348160", "GSM3348161", "GSM3348162", "GSM3348163", "GSM3348164",
+  "GSM3348165", "GSM4254150", "GSM4254151", "GSM4254152", "GSM4254153", "GSM4254166",
+  "GSM4254168", "GSM6008379", "GSM6008380", "GSM6008381", "GSM8346612", "GSM8346613",
+  "GSM8346614", "GSM1654561", "GSM1654563", "GSM1654556", "GSM1654559", "GSM2033141",
+  "GSM2033142", "GSM2033143", "GSM2033147", "GSM2033148", "GSM2033149", "GSM5949385",
+  "GSM5949386", "GSM5949387", "GSM5949388", "GSM3330300", "GSM3330301", "GSM3330302",
+  "GSM3330303", "GSM3330304", "GSM3330305", "GSM3330306", "GSM3330307", "GSM3330308",
+  "GSM3330309", "GSM3330310", "GSM3330311", "GSM8634120", "GSM8634121", "GSM8634122",
+  "GSM8634123", "GSM8634124", "GSM8634125", "GSM4058558", "GSM4058559", "GSM4058560")
+
+srr_data <- get_srr_accessions(gsm)
+
+# If data is found, save it as a CSV (you can also use read.csv to read it later)
+if (!is.null(srr_data)) {
+  write.csv(srr_data, "srr_data.csv", row.names = FALSE)
+  message("Data saved to srr_data.csv")
+} else {
+  message("No data available.")
+}
+
+get_srr_from_vector <- function(uid_vector) {
+  srr_results <- vector("character", length = length(uid_vector))  # Initialize an empty character vector to store SRR results
+  
+  for (i in seq_along(uid_vector)) {
+    uid <- uid_vector[i]
+    
+    # Try fetching the information and extracting SRR
+    tryCatch({
+      # Fetch detailed info from SRA
+      sra_info <- entrez_summary(db = "sra", id = uid)
+      
+      # Extract the SRR accession using a regular expression
+      srr <- sub('.*acc="(SRR[0-9]+)".*', '\\1', sra_info$run)
+      
+      # Store the result in the corresponding index
+      srr_results[i] <- srr
+      cat("Successfully extracted SRR for UID:", uid, "->", srr, "\n")
+    }, error = function(e) {
+      cat("Error fetching or processing UID:", uid, "\n")
+      cat("Error message:", e$message, "\n")
+      srr_results[i] <- NA  # Assign NA if there was an error for that UID
+    })
+  }
+  
+  return(srr_results)
+}
+
+# Call the function to get SRR results
+srr_results <- get_srr_from_vector(srr_data$SRA)
+
+# Check if srr_results is shorter than sra_data$SRA
+if (length(srr_results) < length(srr_data$SRA)) {
+  # Pad srr_results with NAs if it's shorter
+  srr_results <- c(srr_results, rep(NA, length(srr_data$SRA) - length(srr_results)))
+} 
+
+# Check if the lengths are now the same
+if (length(srr_results) == length(srr_data$SRA)) {
+  message("All UID were processed successfully. No missing SRR values.")
+} else {
+  message("There is a mismatch in lengths after padding.")
+}
+
+# Ensure srr_results is of the same length as srr_data
+if (length(srr_results) != length(srr_data$SRA)) {
+  stop("Length mismatch after padding. Something went wrong.")
+}
+
+# Assign the SRR results to the 'RUN' column of the dataframe
+srr_data$RUN <- srr_results
+
+# Print the updated dataframe to check
+print(srr_data)
+
+# Check which GSM values are missing in the 'GSM' column of srr_data
+missing_gsms <- gsm[!gsm %in% srr_data$GSM]
+
+# Print missing GSM values
+if(length(missing_gsms) > 0) {
+  print("Missing GSM values:")
+  print(missing_gsms)
+} else {
+  print("All GSM values are present.")
+}
+
+additional_rows <- data.frame(
+  GSM = c("GSM8634120", "GSM8634121", "GSM8634122", "GSM8634123", "GSM8634124", "GSM8634125"),
+  SRA = NA,  # Set SRA as NA
+  RUN = c("SRR31200104", "SRR31200103", "SRR31200102", "SRR31200101", "SRR31200100", "SRR31200099"),
+  stringsAsFactors = FALSE
+)
+
+# Add the new rows to the existing dataframe
+srr_data <- rbind(srr_data, additional_rows)
+
+# Save the updated dataframe as a CSV
+write.csv(srr_data, "endothelium_runs.csv", row.names = FALSE)
+
+# Print message confirming save
+message("Data saved as 'endothelium_runs.csv'")
+
+# Optionally, print the first few rows to confirm the changes
+head(srr_data)
+```
+
+## Get layout and download fastq
+
+SET DIRECTORY IN WHICH YOU WANT TO SAVE DATA
+This will take several days if done on a normal computer.
+
+```{r}
+
+# Define your SRA run IDs and output directory
+srr_run_ids <- srr_data$RUN
+output_dir <- "H:/FASTQ"  # Change to your directory
+
+# Ensure the output directory exists
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+
+# Modify the SRA Toolkit configuration to set the temporary directory for fasterq-dump
+temp_dir <- "H:/temp_files"  # Change this to your desired temporary files directory
+
+# Ensure the temp directory exists
+if (!dir.exists(temp_dir)) {
+  dir.create(temp_dir)
+}
+
+# Function to clean up temp files
+cleanup_temp_files <- function(temp_dir) {
+  # List all files matching fastq.tmp.* pattern in the temp directory
+  temp_files <- list.files(temp_dir, pattern = "^fastq.tmp.*", full.names = TRUE)
+  
+  if (length(temp_files) > 0) {
+    cat("Cleaning up temporary files...\n")
+    # Delete each temporary file
+    file.remove(temp_files)
+  }
+}
+
+# Correctly reference the user profile directory using Sys.getenv("USERPROFILE")
+settings_file <- file.path(Sys.getenv("USERPROFILE"), ".ncbi", "user-settings.mkfg")
+
+# Ensure that the .ncbi folder exists in the user profile directory
+if (!dir.exists(file.path(Sys.getenv("USERPROFILE"), ".ncbi"))) {
+  dir.create(file.path(Sys.getenv("USERPROFILE"), ".ncbi"))
+}
+
+# Modify the file to set the new temporary file directory
+writeLines(paste("/repository/user/main/public/root = \"", temp_dir, "\"", sep = ""), settings_file)
+
+results <- list()
+log_file <- "H:/FASTQ/error_log.txt"  # Path to log file for failed processes
+
+# Retry Parameters
+max_retries <- 3  # Maximum number of retries
+retry_delay <- 60  # Delay (in seconds) between retries
+
+# Function to execute a command and handle retries
+run_with_retry <- function(command, max_retries = 3, delay = 60) {
+  attempt <- 1
+  while (attempt <= max_retries) {
+    cat("Attempt", attempt, "for command:", command, "\n")
+    
+    # Execute the command
+    result <- system(command, intern = TRUE)
+    
+    # Check if the command was successful (look for the absence of 'error' in the result)
+    if (length(result) == 0 || all(!grepl("error", result, ignore.case = TRUE))) {
+      cat("Command successful.\n")
+      return(TRUE)  # Success
+    }
+    
+    # Log failure and retry
+    cat("Error occurred. Retrying in", delay, "seconds...\n", file = log_file, append = TRUE)
+    Sys.sleep(delay)  # Wait before retrying
+    attempt <- attempt + 1
+  }
+  
+  # If all retries fail, log the failure
+  cat("Command failed after", max_retries, "retries. Logging the error.\n", file = log_file, append = TRUE)
+  return(FALSE)  # Failure after retries
+}
+
+# Loop through each SRA run ID, processing 50 runs at a time
+batch_size <- 50
+total_runs <- length(srr_run_ids)
+
+for (start_idx in seq(1, total_runs, by = batch_size)) {
+  # Determine the end index for the current batch
+  end_idx <- min(start_idx + batch_size - 1, total_runs)
+  
+  # Get the current batch of SRR run IDs
+  current_batch <- srr_run_ids[start_idx:end_idx]
+  
+  cat("Processing batch from index", start_idx, "to", end_idx, "\n")
+  
+  for (srr_run_id in current_batch) {
+    # Check if the FASTQ files already exist in the output directory
+    existing_files <- list.files(output_dir, pattern = paste0(srr_run_id, ".*\\.fastq$"))
+    if (length(existing_files) > 0) {
+      cat("FASTQ files already exist for", srr_run_id, "- Skipping download.\n")
+      layout <- if (length(existing_files) > 1) "paired" else "single"
+      results <- append(results, list(data.frame(SRR = srr_run_id, Layout = layout)))
+      next
+    }
+    
+    # Step 1: Download the SRA file using prefetch (if not already downloaded)
+    prefetch_command <- paste('cmd.exe /c "C:\\sratools 3.2.0\\bin\\prefetch"', srr_run_id)
+    
+      # Print the command for debugging
+    cat("Running prefetch command:", fasterq_dump_command, "\n")
+    
+      # Run the command explicitly through the cmd.exe shell with retry mechanism
+    if (!run_with_retry(prefetch_command, max_retries, retry_delay)) {
+      results <- append(results, list(data.frame(SRR = srr_run_id, Layout = "failed")))
+      next
+    }
+    
+     # Step 2: Run fasterq-dump to convert the local .sra file to FASTQ
+    sra_file_path <- paste0("H:/temp_files/sra/", srr_run_id, ".sra")  # Construct the local path to the .sra file
+    fasterq_dump_command <- paste('cmd.exe /c "C:\\sratools 3.2.0\\bin\\fasterq-dump"', sra_file_path, '--outdir', output_dir, '--split-files')
+    
+      # Print the command for debugging
+    cat("Running fasterq-dump command:", fasterq_dump_command, "\n")
+    
+      # Run the command explicitly through the cmd.exe shell with retry mechanism
+    if (!run_with_retry(fasterq_dump_command, max_retries, retry_delay)) {
+      results <- append(results, list(data.frame(SRR = srr_run_id, Layout = "failed")))
+      next
+    }
+    
+    # Capture the output of fasterq-dump to extract spot and read information
+    fasterq_output <- system(fasterq_dump_command, intern = TRUE)
+
+    # Extract the spots and reads information from the output
+    spots_line <- grep("spots read", fasterq_output, value = TRUE)
+    reads_line <- grep("reads read", fasterq_output, value = TRUE)
+    written_line <- grep("reads written", fasterq_output, value = TRUE)
+
+    # Extract numbers from the output lines (this assumes the format is consistent)
+    spots_read <- sub(".*spots read\\s*:\\s*([0-9,]+).*", "\\1", spots_line)
+    reads_read <- sub(".*reads read\\s*:\\s*([0-9,]+).*", "\\1", reads_line)
+    reads_written <- sub(".*reads written\\s*:\\s*([0-9,]+).*", "\\1", written_line)
+    
+    # Print the extracted information for debugging
+    cat("spots read      :", spots_read, "\n")
+    cat("reads read      :", reads_read, "\n")
+    cat("reads written   :", reads_written, "\n")
+
+    # Step 3: Check if the FASTQ files were generated
+    files <- list.files(output_dir, pattern = paste0(srr_run_id, ".*\\.fastq$"))
+    
+    # Print the files in the output directory for debugging
+    cat("Files in the output directory:", files, "\n")
+    
+    if (length(files) == 0) {
+      cat("No files generated for", srr_run_id, "- Marking as failed.\n", file = log_file, append = TRUE)
+      results <- append(results, list(data.frame(SRR = srr_run_id, Layout = "failed")))
+    } else {
+      # Check if the files are paired or single
+      layout <- if (length(files) > 1) "paired" else "single"
+      cat("Layout for", srr_run_id, "is:", layout, "\n")
+      results <- append(results, list(data.frame(SRR = srr_run_id, Layout = layout)))
+    }
+    
+    # Clean up any temporary files
+    cleanup_temp_files(temp_dir)
+    
+    
+    # Add a delay (sleep) between processes to avoid overloading the system
+    Sys.sleep(10)  # Sleep for 10 seconds between processing each SRR
+    
+  }
+  
+  # Optional: Sleep between batches to reduce load on the system
+  cat("Waiting for 30 minutes before processing the next batch...\n")
+  Sys.sleep(1800)  # Sleep for 30 minutes between batches
+  
+}
+
+# Combine the results into a single data frame
+df <- do.call(rbind, results)
+
+# Print the final data frame
+print(df)
+
+```
+## Layout distribution and failed downloads
+```{r}
+# Assuming df is a list and layout is one of the elements in the list
+# Convert layout (which is a character vector) to a factor if it's not already
+df[["Layout"]] <- factor(df[["Layout"]], levels = c("single", "paired", "failed"))
+
+# Count the occurrences of each value
+layout_counts <- table(df[["Layout"]])
+
+# Print the counts
+print(layout_counts)
+
+# Assuming df is a list and layout is one of the elements in the list
+# Convert layout (which is a character vector) to a factor if it's not already
+df[["SRR"]] <- factor(df[["SRR"]])
+
+# Count the occurrences of each value
+layout_counts <- table(df[["SRR"]])
+
+message("Laytout of the samples")
+# Print the counts
+print(layout_counts)
+
+message("Failed downloads")
+failed_downloads = df$SRR[df$Layout == "failed"]
+print(failed_downloads)
+```
+
+## Run Faster q on failed downloads to debug
+```{r}
+output_dir <- "H:/FASTQ/failed_downloads_retry"  # Change to your directory
+
+# Ensure the output directory exists
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+
+total_runs <- length(failed_downloads)
+
+# Function to run commands with retries and verbose error output
+run_with_retry_debug <- function(command, max_retries = 3, retry_delay = 5) {
+  attempt <- 1
+  while (attempt <= max_retries) {
+    cat("Attempt", attempt, "for command:", command, "\n")
+    output <- system(command, intern = TRUE, ignore.stderr = FALSE)
+    if (length(output) == 0 || any(grepl("error|fail", output, ignore.case = TRUE))) {
+      cat("Error in command output:\n", paste(output, collapse = "\n"), "\n")
+      attempt <- attempt + 1
+      cat("Retrying...\n")
+      Sys.sleep(retry_delay)  # Wait before retrying
+    } else {
+      cat("Command succeeded on attempt", attempt, "\n")
+      return(TRUE)  # Command succeeded
+    }
+  }
+  cat("Max retries reached. Command failed.\n")
+  return(FALSE)  # Command failed after retries
+}
+
+for (start_idx in seq(1, total_runs, by = batch_size)) {
+  # Determine the end index for the current batch
+  end_idx <- min(start_idx + batch_size - 1, total_runs)
+  
+  # Get the current batch of SRR run IDs
+  current_batch <- failed_downloads[start_idx:end_idx]
+  
+  cat("Processing batch from index", start_idx, "to", end_idx, "\n")
+  
+  for (srr_run_id in current_batch) {
+    # Check if the FASTQ files already exist in the output directory
+    existing_files <- list.files(output_dir, pattern = paste0(srr_run_id, ".*\\.fastq$"))
+    if (length(existing_files) > 0) {
+      cat("FASTQ files already exist for", srr_run_id, "- Skipping download.\n")
+      layout <- if (length(existing_files) > 1) "paired" else "single"
+      results <- append(results, list(data.frame(SRR = srr_run_id, Layout = layout)))
+      next
+    }
+    
+    # Step 1: Download the SRA file using prefetch (if not already downloaded)
+    prefetch_command <- paste('cmd.exe /c "C:\\sratools 3.2.0\\bin\\prefetch"', srr_run_id,  "--verbose", "--max-size 50GB")
+    
+    # Print the command for debugging
+    cat("Running prefetch command:", prefetch_command, "\n")
+    
+    # Run the command with retry mechanism
+    if (!run_with_retry_debug(prefetch_command, max_retries = 3, retry_delay = 10)) {
+      results <- append(results, list(data.frame(SRR = srr_run_id, Layout = "failed")))
+      next
+    }
+    
+    # Step 2: Run fasterq-dump to convert the local .sra file to FASTQ
+    sra_file_path <- paste0("H:/temp_files/sra/", srr_run_id, ".sra")  # Construct the local path to the .sra file
+    fasterq_dump_command <- paste('cmd.exe /c "C:\\sratools 3.2.0\\bin\\fasterq-dump"', sra_file_path, "--verbose", '--outdir', output_dir, '--split-files')
+    
+    # Print the command for debugging
+    cat("Running fasterq-dump command:", fasterq_dump_command, "\n")
+    
+    # Run the command with retry mechanism
+    if (!run_with_retry_debug(fasterq_dump_command, max_retries = 3, retry_delay = 10)) {
+      results <- append(results, list(data.frame(SRR = srr_run_id, Layout = "failed")))
+      next
+    }
+    
+    # Capture the output of fasterq-dump to extract spot and read information
+    fasterq_output <- system(fasterq_dump_command, intern = TRUE)
+    
+    # Print the output for debugging
+    cat("fasterq-dump output:\n", paste(fasterq_output, collapse = "\n"), "\n")
+
+    # Extract the spots and reads information from the output
+    spots_line <- grep("spots read", fasterq_output, value = TRUE)
+    reads_line <- grep("reads read", fasterq_output, value = TRUE)
+    written_line <- grep("reads written", fasterq_output, value = TRUE)
+
+    # Extract numbers from the output lines (this assumes the format is consistent)
+    spots_read <- sub(".*spots read\\s*:\\s*([0-9,]+).*", "\\1", spots_line)
+    reads_read <- sub(".*reads read\\s*:\\s*([0-9,]+).*", "\\1", reads_line)
+    reads_written <- sub(".*reads written\\s*:\\s*([0-9,]+).*", "\\1", written_line)
+    
+    # Print the extracted information for debugging
+    cat("spots read      :", spots_read, "\n")
+    cat("reads read      :", reads_read, "\n")
+    cat("reads written   :", reads_written, "\n")
+
+    # Step 3: Check if the FASTQ files were generated
+    files <- list.files(output_dir, pattern = paste0(srr_run_id, ".*\\.fastq$"))
+    
+    # Print the files in the output directory for debugging
+    cat("Files in the output directory:", files, "\n")
+    
+    if (length(files) == 0) {
+      cat("No files generated for", srr_run_id, "- Marking as failed.\n")
+      results <- append(results, list(data.frame(SRR = srr_run_id, Layout = "failed")))
+    } else {
+      # Check if the files are paired or single
+      layout <- if (length(files) > 1) "paired" else "single"
+      cat("Layout for", srr_run_id, "is:", layout, "\n")
+      results <- append(results, list(data.frame(SRR = srr_run_id, Layout = layout)))
+    }
+    
+    # Clean up any temporary files
+    cleanup_temp_files(temp_dir)
+    
+    # Add a delay (sleep) between processes to avoid overloading the system
+    Sys.sleep(10)  # Sleep for 10 seconds between processing each SRR
+  }
+  
+  # Optional: Sleep between batches to reduce load on the system
+  cat("Waiting for 30 minutes before processing the next batch...\n")
+  Sys.sleep(1800)  # Sleep for 30 minutes between batches
+}
+
+```
+
+## Store everything in the dataframe
+```{r}
+# Step 1: Create an empty 'Layout' column in srr_data, initialized to NA
+srr_data$Layout <- NA
+
+df$Layout <- as.character(df$Layout)
+# Step 2: Loop through each RUN in srr_data
+for (i in 1:nrow(srr_data)) {
+  # Check if RUN in srr_data exists in the layout_df
+  matching_row <- df[df$SRR == srr_data$RUN[i], ]
+  
+ if (nrow(matching_row) > 0) {
+  srr_data$Layout[i] <- matching_row$Layout
+} else {
+  srr_data$Layout[i] <- "unknown"  # or whatever value you prefer
+}
+  }
+
+# Print the updated dataframe to check
+print(srr_data)
+```
+
+## Download CSV
+```{r}
+# Specify the path and name for your output CSV file
+output_file <- "C:/Users/cst325/Desktop/Rdata/srr_data_output.csv"
+
+# Write the srr_data dataframe to the CSV file
+write.csv(srr_data, file = output_file, row.names = FALSE)
+
+# Print a message confirming the export
+print(paste("srr_data has been saved to", output_file))
+
+```
+
